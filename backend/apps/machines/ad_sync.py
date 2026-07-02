@@ -1,6 +1,10 @@
 """
 AD discovery — enumerate computer objects từ Active Directory qua LDAP và
 đồng bộ vào bảng Machine. Không nhập tay danh sách máy.
+
+Cấu hình lấy theo thứ tự ưu tiên:
+1. Bản ghi ADConfig trong DB (chỉnh từ Web UI) khi enabled=True.
+2. Biến môi trường AD_* (settings.AD).
 """
 from __future__ import annotations
 
@@ -39,30 +43,43 @@ class SyncResult:
         }
 
 
-def sync_computers_from_ad(base_dn: str | None = None, search_ou: str | None = None) -> SyncResult:
+def resolve_ad_config() -> dict:
     """
-    Query AD (objectClass=computer) và upsert vào Machine.
-    - base_dn / search_ou: mặc định lấy từ settings.AD['BASE_DN'].
-    Trả SyncResult với số created/updated.
+    Trả về cấu hình AD hiệu lực dưới dạng dict chuẩn hóa.
+    Ưu tiên ADConfig trong DB (enabled), fallback settings.AD.
     """
+    from .models import ADConfig
+
+    obj = ADConfig.objects.filter(pk=1, enabled=True).first()
+    if obj and obj.server and obj.bind_user:
+        return {
+            "SERVER": obj.server,
+            "BASE_DN": obj.base_dn,
+            "SEARCH_OU": obj.search_ou,
+            "BIND_USER": obj.bind_user,
+            "BIND_PASSWORD": obj.get_password(),
+            "USE_SSL": obj.use_ssl,
+            "SOURCE": "db",
+        }
+
     cfg = settings.AD
-    result = SyncResult()
+    return {
+        "SERVER": cfg.get("SERVER", ""),
+        "BASE_DN": cfg.get("BASE_DN", ""),
+        "SEARCH_OU": "",
+        "BIND_USER": cfg.get("BIND_USER", ""),
+        "BIND_PASSWORD": cfg.get("BIND_PASSWORD", ""),
+        "USE_SSL": cfg.get("USE_SSL", False),
+        "SOURCE": "env",
+    }
 
-    if not cfg.get("SERVER") or not cfg.get("BIND_USER"):
-        result.error = "Chưa cấu hình AD (AD_SERVER / AD_BIND_USER)."
-        logger.warning(result.error)
-        return result
 
-    search_base = search_ou or base_dn or cfg.get("BASE_DN")
-    if not search_base:
-        result.error = "Thiếu BASE_DN để tìm kiếm."
-        return result
-
+def _connect(cfg: dict):
+    """Mở kết nối LDAP + bind. Trả (conn, error_str). conn=None nếu lỗi."""
     try:
-        from ldap3 import ALL, NTLM, SUBTREE, Connection, Server
+        from ldap3 import ALL, NTLM, Connection, Server
     except ImportError:
-        result.error = "ldap3 chưa được cài."
-        return result
+        return None, "ldap3 chưa được cài."
 
     try:
         server = Server(cfg["SERVER"], use_ssl=cfg.get("USE_SSL", False), get_info=ALL)
@@ -73,12 +90,83 @@ def sync_computers_from_ad(base_dn: str | None = None, search_ou: str | None = N
             authentication=NTLM,
             auto_bind=True,
         )
+        return conn, ""
     except Exception as e:  # noqa: BLE001
-        result.error = f"Kết nối/bind AD thất bại: {e}"
+        return None, f"Kết nối/bind AD thất bại: {e}"
+
+
+def test_ad_connection(cfg: dict | None = None) -> dict:
+    """
+    Kiểm tra kết nối + bind + (nếu có base) đếm số máy tính tìm được.
+    Không trả về mật khẩu. Dùng cho nút 'Test kết nối' trên UI.
+    """
+    cfg = cfg or resolve_ad_config()
+
+    if not cfg.get("SERVER") or not cfg.get("BIND_USER"):
+        return {"ok": False, "error": "Chưa cấu hình AD (thiếu server hoặc bind user)."}
+
+    conn, error = _connect(cfg)
+    if error:
+        return {"ok": False, "error": error}
+
+    info = {
+        "ok": True,
+        "server": cfg["SERVER"],
+        "bound_as": cfg["BIND_USER"],
+        "source": cfg.get("SOURCE", ""),
+    }
+    try:
+        from ldap3 import SUBTREE
+
+        base = cfg.get("SEARCH_OU") or cfg.get("BASE_DN")
+        if base:
+            conn.search(
+                search_base=base,
+                search_filter="(objectClass=computer)",
+                search_scope=SUBTREE,
+                attributes=["name"],
+            )
+            info["computers_found"] = len(conn.entries)
+            info["search_base"] = base
+        else:
+            info["note"] = "Bind OK nhưng chưa đặt base_dn để đếm máy."
+    except Exception as e:  # noqa: BLE001
+        info["ok"] = False
+        info["error"] = f"Bind OK nhưng tìm kiếm thất bại: {e}"
+    finally:
+        conn.unbind()
+
+    return info
+
+
+def sync_computers_from_ad(base_dn: str | None = None, search_ou: str | None = None) -> SyncResult:
+    """
+    Query AD (objectClass=computer) và upsert vào Machine.
+    - search_ou / base_dn: override; mặc định lấy từ cấu hình hiệu lực.
+    Trả SyncResult với số created/updated.
+    """
+    cfg = resolve_ad_config()
+    result = SyncResult()
+
+    if not cfg.get("SERVER") or not cfg.get("BIND_USER"):
+        result.error = "Chưa cấu hình AD (server / bind user)."
+        logger.warning(result.error)
+        return result
+
+    search_base = search_ou or base_dn or cfg.get("SEARCH_OU") or cfg.get("BASE_DN")
+    if not search_base:
+        result.error = "Thiếu BASE_DN để tìm kiếm."
+        return result
+
+    conn, error = _connect(cfg)
+    if error:
+        result.error = error
         logger.error(result.error)
         return result
 
     try:
+        from ldap3 import SUBTREE
+
         conn.search(
             search_base=search_base,
             search_filter="(objectClass=computer)",

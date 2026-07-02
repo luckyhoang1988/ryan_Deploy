@@ -34,6 +34,56 @@ class Machine(TimeStampedModel):
         return self.fqdn or self.hostname or self.ip_address
 
 
+class ADConfig(TimeStampedModel):
+    """
+    Cấu hình kết nối Active Directory/LDAP — chỉnh trực tiếp từ Web UI.
+    Singleton (luôn pk=1). Mật khẩu bind lưu dạng mã hóa Fernet (vault).
+    Khi `enabled=True`, cấu hình này được ưu tiên hơn biến môi trường AD_*.
+    """
+
+    server = models.CharField(
+        max_length=255, blank=True,
+        help_text="Host hoặc URI, vd: dc01.corp.local hoặc ldaps://dc01.corp.local",
+    )
+    base_dn = models.CharField(
+        max_length=512, blank=True, help_text="vd: DC=corp,DC=local",
+    )
+    search_ou = models.CharField(
+        max_length=512, blank=True,
+        help_text="OU giới hạn tìm kiếm (để trống = toàn bộ base_dn)",
+    )
+    bind_user = models.CharField(
+        max_length=255, blank=True, help_text="vd: CORP\\svc_deploy",
+    )
+    bind_password_enc = models.TextField(blank=True, help_text="Token Fernet, không hiển thị")
+    use_ssl = models.BooleanField(default=False, help_text="LDAPS (cổng 636)")
+    enabled = models.BooleanField(
+        default=False, help_text="Dùng cấu hình này thay cho biến môi trường AD_*",
+    )
+
+    class Meta:
+        verbose_name = "Cấu hình AD"
+        verbose_name_plural = "Cấu hình AD"
+
+    def __str__(self):
+        return f"ADConfig({self.server or 'chưa cấu hình'})"
+
+    def set_password(self, raw: str):
+        from apps.credentials.vault import encrypt
+
+        self.bind_password_enc = encrypt(raw) if raw else ""
+
+    def get_password(self) -> str:
+        from apps.credentials.vault import decrypt
+
+        return decrypt(self.bind_password_enc) if self.bind_password_enc else ""
+
+    @classmethod
+    def load(cls) -> "ADConfig":
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
 class MachineGroup(TimeStampedModel):
     """Nhóm máy để chọn nhanh khi tạo deployment."""
 

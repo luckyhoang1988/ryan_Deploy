@@ -1,9 +1,19 @@
+from django.urls import path
 from rest_framework.routers import DefaultRouter
 
-from .views import MachineGroupViewSet, MachineViewSet
+from .views import (
+    ADConfigTestView,
+    ADConfigView,
+    MachineGroupViewSet,
+    MachineViewSet,
+)
 
 router = DefaultRouter()
 router.register("machines", MachineViewSet, basename="machine")
 router.register("machine-groups", MachineGroupViewSet, basename="machinegroup")
 
-urlpatterns = router.urls
+urlpatterns = [
+    path("ad-config/", ADConfigView.as_view(), name="ad-config"),
+    path("ad-config/test/", ADConfigTestView.as_view(), name="ad-config-test"),
+    *router.urls,
+]

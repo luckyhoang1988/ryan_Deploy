@@ -1,6 +1,12 @@
 from django.contrib import admin
 
-from .models import Machine, MachineGroup
+from .models import ADConfig, Machine, MachineGroup
+
+
+@admin.register(ADConfig)
+class ADConfigAdmin(admin.ModelAdmin):
+    list_display = ("server", "base_dn", "bind_user", "use_ssl", "enabled")
+    exclude = ("bind_password_enc",)
 
 
 @admin.register(Machine)
