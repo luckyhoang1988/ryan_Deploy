@@ -1,0 +1,20 @@
+"""Test/verify settings — dùng SQLite để chạy check/makemigrations không cần Postgres."""
+from .base import *  # noqa: F401,F403
+
+DEBUG = True
+ALLOWED_HOSTS = ["*", "testserver"]
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "test_db.sqlite3",  # noqa: F405
+    }
+}
+# Chạy Celery đồng bộ khi test
+CELERY_TASK_ALWAYS_EAGER = True
+
+# Cache in-memory để test không phụ thuộc Redis (throttle dùng cache)
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+    }
+}

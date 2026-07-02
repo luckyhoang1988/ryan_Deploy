@@ -1,0 +1,85 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pydeploy}
+      POSTGRES_USER: ${POSTGRES_USER:-pydeploy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pydeploy}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pydeploy}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build: ./backend
+    command: >
+      sh -c "python manage.py migrate &&
+             gunicorn pydeploy.wsgi:application --bind 0.0.0.0:8000 --workers 3"
+    environment:
+      DJANGO_SETTINGS_MODULE: pydeploy.settings.dev
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+      - media:/app/media
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: ./backend
+    command: celery -A pydeploy worker --loglevel=info --concurrency=${PYDEPLOY_MAX_CONCURRENCY:-15}
+    environment:
+      DJANGO_SETTINGS_MODULE: pydeploy.settings.dev
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+      - media:/app/media
+    depends_on:
+      - web
+      - redis
+      - postgres
+
+  beat:
+    build: ./backend
+    command: celery -A pydeploy beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    environment:
+      DJANGO_SETTINGS_MODULE: pydeploy.settings.dev
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - web
+      - redis
+      - postgres
+
+volumes:
+  pgdata:
+  media:

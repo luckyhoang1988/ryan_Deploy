@@ -1,0 +1,24 @@
+# --- Core ---
+Django==5.1.4
+djangorestframework==3.15.2
+django-cors-headers==4.6.0
+psycopg[binary]==3.2.3
+python-dotenv==1.0.1
+
+# --- Async / queue ---
+celery==5.4.0
+redis==5.2.1
+django-celery-results==2.5.1
+django-celery-beat==2.7.0
+
+# --- Deployment engine (agentless push) ---
+impacket==0.12.0
+
+# --- Active Directory discovery ---
+ldap3==2.9.1
+
+# --- Credential vault (encryption at-rest) ---
+cryptography==44.0.0
+
+# --- Server ---
+gunicorn==23.0.0
