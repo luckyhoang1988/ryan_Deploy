@@ -1,28 +1,51 @@
 import { NavLink } from "react-router-dom";
 import { useAuth } from "../auth";
+import Icon from "./Icon";
+
+const NAV = [
+  { to: "/", end: true, label: "Dashboard", icon: "grid" },
+  { to: "/packages", label: "Packages", icon: "package" },
+  { to: "/machines", label: "Máy trạm", icon: "monitor" },
+  { to: "/deployments", label: "Deployments", icon: "send" },
+];
 
 export default function Layout({ children }) {
   const { user, logout, hasRole } = useAuth();
+  const roles = user.roles?.join(", ") || "no-role";
   return (
     <div className="layout">
       <aside className="sidebar">
-        <h1>PyDeploy</h1>
+        <div className="brand">
+          <Icon name="server" size={22} />
+          <span>PyDeploy</span>
+        </div>
         <nav className="nav">
-          <NavLink to="/" end>Dashboard</NavLink>
-          <NavLink to="/packages">Packages</NavLink>
-          <NavLink to="/machines">Máy trạm</NavLink>
-          <NavLink to="/deployments">Deployments</NavLink>
-          {hasRole("admin") && <NavLink to="/users">Người dùng</NavLink>}
+          {NAV.map((n) => (
+            <NavLink key={n.to} to={n.to} end={n.end}>
+              <Icon name={n.icon} /> <span>{n.label}</span>
+            </NavLink>
+          ))}
+          {hasRole("admin") && (
+            <NavLink to="/users">
+              <Icon name="users" /> <span>Người dùng</span>
+            </NavLink>
+          )}
         </nav>
       </aside>
       <main className="content">
         <div className="topbar">
           <div />
           <div className="row">
-            <span className="user">
-              {user.username} · {user.roles?.join(", ") || "no-role"}
-            </span>
-            <button className="btn ghost" onClick={logout}>Đăng xuất</button>
+            <div className="userchip">
+              <span className="avatar">{user.username?.[0]?.toUpperCase() || "?"}</span>
+              <span className="userinfo">
+                <span className="uname">{user.username}</span>
+                <span className="urole">{roles}</span>
+              </span>
+            </div>
+            <button className="btn ghost" onClick={logout}>
+              <Icon name="logOut" size={16} /> <span>Đăng xuất</span>
+            </button>
           </div>
         </div>
         {children}
