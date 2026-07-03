@@ -14,6 +14,25 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-03 — Hardening trigger/cancel: hai gotcha (update() bỏ auto_now, progress_cb nuốt exception)
+**Bối cảnh:** Fix deployment kẹt RUNNING khi launch_deployment ném lỗi, và cancel giữa
+chừng không dừng được executor đang chạy (chờ collect tới 30 phút).
+**Bài học:**
+1. **`QuerySet.update()` KHÔNG kích hoạt `auto_now`/không set field không liệt kê.** Claim
+   SCHEDULED→RUNNING bằng `.update(status=RUNNING)` nên `updated_at` không đổi và `started_at`
+   vẫn None → reconcile không có mốc thời gian tin cậy để phát hiện "RUNNING kẹt bao lâu".
+   Giải: set `started_at=now` NGAY trong lệnh `.update()` của claim, rồi reconcile so
+   `now - started_at > ngưỡng`. Đừng dựa vào auto_now cho state-transition kiểu update().
+2. **`progress_cb` được gọi trong `try/except Exception` (để progress không làm hỏng deploy)
+   → KHÔNG thể dùng nó để báo hủy** (raise sẽ bị nuốt). Phải thêm kênh riêng `cancel_check`
+   trả bool, gọi ở mốc mỗi bước + trong vòng chờ collect, raise `CancelledError`. Sau
+   `executor.run()` phải `refresh_from_db(fields=["status"])` và nếu CANCELLED thì return
+   sớm — nếu không nhánh xử-lý-thất-bại sẽ ghi đè CANCELLED thành FAILED (hoặc tệ hơn:
+   retry nếu step ∈ transient).
+**Áp dụng:** Reconcile/lưới-an-toàn cần timestamp do chính transition ghi (không phải
+auto_now). Cancel hợp tác cho task dài: kênh poll DB riêng, không tái dùng progress_cb;
+luôn re-read trạng thái sau bước dài trước khi kết luận kết quả.
+
 ## 2026-07-03 — Bốn gotcha khi hardening Phase 2 (annotate/DRF/Celery-eager/SQLite-thread)
 **Bối cảnh:** Sửa N+1 list deployment, chuyển sync AD/online check sang async + endpoint
 poll task, viết test cho cả hai.

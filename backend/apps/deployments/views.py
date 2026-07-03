@@ -1,8 +1,11 @@
+import logging
+
 from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 
 from apps.audit.models import AuditLog
 from apps.jobs.models import JobStatus
@@ -10,6 +13,8 @@ from apps.jobs.models import JobStatus
 from .models import Deployment, DeploymentStatus
 from .orchestrator import cancel_deployment, launch_deployment
 from .serializers import DeploymentSerializer
+
+logger = logging.getLogger("apps.deployments")
 
 
 class DeploymentViewSet(viewsets.ModelViewSet):
@@ -37,6 +42,14 @@ class DeploymentViewSet(viewsets.ModelViewSet):
         .order_by("-created_at")
     )
     serializer_class = DeploymentSerializer
+
+    def get_throttles(self):
+        # Chống spam các action ghi/tốn kém (trigger/cancel có thể đẩy hàng trăm máy).
+        # Các action đọc khác không giới hạn thêm (ngoài throttle mặc định).
+        if self.action in ("trigger", "cancel"):
+            self.throttle_scope = "deployment_action"
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
 
     def perform_create(self, serializer):
         deployment = serializer.save()
@@ -81,7 +94,19 @@ class DeploymentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_202_ACCEPTED,
             )
 
-        job_count = launch_deployment(deployment)
+        # launch_deployment có thể ném lỗi (broker/DB) sau khi đã đặt RUNNING → revert
+        # về FAILED để không kẹt, và báo lỗi rõ cho client thay vì 500 trần trụi.
+        try:
+            job_count = launch_deployment(deployment)
+        except Exception:
+            logger.exception("launch_deployment lỗi cho %s (trigger thủ công)", deployment.id)
+            deployment.status = DeploymentStatus.FAILED
+            deployment.finished_at = timezone.now()
+            deployment.save(update_fields=["status", "finished_at"])
+            return Response(
+                {"detail": "Không kích hoạt được deployment (lỗi hệ thống)."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
         AuditLog.record(
             AuditLog.Action.DEPLOYMENT_TRIGGER,

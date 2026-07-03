@@ -53,9 +53,11 @@ export default function Machines() {
               Cấu hình AD
             </button>
           )}
-          <button className="btn ghost" onClick={syncAd} disabled={busy}>
-            {busy === "ad" ? "Đang sync…" : "Sync AD"}
-          </button>
+          {hasRole("admin") && (
+            <button className="btn ghost" onClick={syncAd} disabled={busy}>
+              {busy === "ad" ? "Đang sync…" : "Sync AD"}
+            </button>
+          )}
           <button className="btn ghost" onClick={checkOnline} disabled={busy}>
             {busy === "online" ? "Đang kiểm tra…" : "Kiểm tra online"}
           </button>

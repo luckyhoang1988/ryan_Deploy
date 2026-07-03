@@ -26,6 +26,20 @@ logger = logging.getLogger("apps.executor")
 # Mã lỗi SCM khi start một "service" thực chất là cmd.exe — coi là bình thường.
 _IGNORED_SCM_START_ERRORS = (1053, 1053 & 0xFFFF, 0x8007041D)
 
+# NT status báo hiệu sai credential / tài khoản không dùng được → retry vô ích.
+_AUTH_FAILURE_STATUSES = (
+    "STATUS_LOGON_FAILURE",
+    "STATUS_ACCESS_DENIED",
+    "STATUS_ACCOUNT_DISABLED",
+    "STATUS_ACCOUNT_LOCKED_OUT",
+    "STATUS_ACCOUNT_RESTRICTION",
+    "STATUS_INVALID_LOGON_HOURS",
+    "STATUS_INVALID_WORKSTATION",
+    "STATUS_PASSWORD_EXPIRED",
+    "STATUS_PASSWORD_MUST_CHANGE",
+    "STATUS_WRONG_PASSWORD",
+)
+
 # Step names (khớp apps.jobs.models.JobStep)
 STEP_PRECHECK = "precheck"
 STEP_COPY = "copy"
@@ -43,6 +57,8 @@ class ExecResult:
     error: str = ""
     step_reached: str = STEP_PRECHECK
     needs_reboot: bool = False
+    # False khi lỗi chắc chắn KHÔNG tự khỏi khi thử lại (vd sai credential) → caller không retry.
+    retryable: bool = True
     log: list[str] = field(default_factory=list)
 
 
@@ -68,6 +84,7 @@ class PushExecutor:
         timeout: int = 1800,
         smb_port: int = 445,
         progress_cb: Optional[ProgressCb] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ):
         self.host = host
         self.username = username
@@ -78,6 +95,10 @@ class PushExecutor:
         self.timeout = timeout
         self.smb_port = smb_port
         self._progress_cb = progress_cb
+        # Trả True nếu job đã bị hủy → executor dừng hợp tác giữa các bước (đặc biệt trong
+        # vòng chờ collect dài). Bổ sung cho revoke(terminate) của Celery vốn không chắc
+        # dừng sạch giữa lúc SMB đang chạy.
+        self._cancel_check = cancel_check
 
         self._conn = None  # SMBConnection
         self._log: list[str] = []
@@ -92,6 +113,17 @@ class PushExecutor:
                 self._progress_cb(step, message)
             except Exception:  # progress không được làm hỏng deploy
                 logger.exception("progress_cb lỗi")
+
+    def _abort_if_cancelled(self):
+        """Ném CancelledError nếu job đã bị hủy — gọi ở các mốc bước và trong vòng chờ."""
+        if self._cancel_check:
+            try:
+                cancelled = self._cancel_check()
+            except Exception:  # lỗi kiểm tra không được làm hỏng deploy
+                logger.exception("cancel_check lỗi")
+                return
+            if cancelled:
+                raise CancelledError()
 
     def _share_path(self, job_token: str, *parts: str) -> str:
         """Đường dẫn TƯƠNG ĐỐI trong ADMIN$ share."""
@@ -123,12 +155,14 @@ class PushExecutor:
             self._precheck()
 
             # 2) CONNECT + COPY ---------------------------------------------
+            self._abort_if_cancelled()
             self._emit(STEP_COPY, "Kết nối SMB và copy file...")
             result.step_reached = STEP_COPY
             self._connect()
             self._copy_payload(job_token, local_installer_path, installer_filename, install_command)
 
             # 3) EXECUTE -----------------------------------------------------
+            self._abort_if_cancelled()
             self._emit(STEP_EXECUTE, "Tạo service tạm và chạy silent install...")
             result.step_reached = STEP_EXECUTE
             self._execute_via_service(job_token)
@@ -146,6 +180,7 @@ class PushExecutor:
 
         except ExecutorError as e:
             result.error = str(e)
+            result.retryable = e.retryable
             self._emit(result.step_reached, f"LỖI: {e}")
         except Exception as e:  # noqa: BLE001
             result.error = f"Lỗi không mong đợi: {e}"
@@ -181,7 +216,10 @@ class PushExecutor:
             conn.login(self.username, self.password, self.domain)
             self._conn = conn
         except Exception as e:  # noqa: BLE001
-            raise ExecutorError(f"Xác thực/kết nối SMB thất bại: {e}")
+            # Sai credential/tài khoản bị khóa → thử lại cũng vô ích, đánh non-retryable.
+            # Lỗi mạng/kết nối tạm thời vẫn để caller retry.
+            retryable = not self._is_auth_failure(e)
+            raise ExecutorError(f"Xác thực/kết nối SMB thất bại: {e}", retryable=retryable)
 
     def _ensure_dirs(self, job_token: str):
         """Tạo cây thư mục tạm trong ADMIN$ (từng cấp)."""
@@ -264,6 +302,7 @@ class PushExecutor:
         deadline = time.time() + self.timeout
         interval = 3
         while time.time() < deadline:
+            self._abort_if_cancelled()
             content = self._try_read(exit_share)
             if content is not None:
                 try:
@@ -369,6 +408,26 @@ class PushExecutor:
         text = str(exc)
         return any(str(code) in text for code in _IGNORED_SCM_START_ERRORS) or "1053" in text
 
+    @staticmethod
+    def _is_auth_failure(exc) -> bool:
+        text = str(exc).upper()
+        return any(status in text for status in _AUTH_FAILURE_STATUSES)
+
 
 class ExecutorError(Exception):
-    """Lỗi có kiểm soát trong quá trình đẩy."""
+    """Lỗi có kiểm soát trong quá trình đẩy.
+
+    retryable=False đánh dấu lỗi chắc chắn không tự khỏi khi thử lại (vd sai credential),
+    để caller khỏi retry vô ích.
+    """
+
+    def __init__(self, message: str, *, retryable: bool = True):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+class CancelledError(ExecutorError):
+    """Job bị người dùng hủy giữa chừng — dừng đẩy hợp tác (không retry)."""
+
+    def __init__(self, message: str = "Đã hủy bởi người dùng"):
+        super().__init__(message, retryable=False)

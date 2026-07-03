@@ -38,10 +38,13 @@ export default function DeploymentDetail() {
   }, [id, dep?.status]);
 
   const retrigger = async () => {
+    // Xác nhận trước: chạy lại có thể đẩy tới hàng trăm máy — tránh click nhầm.
+    if (!window.confirm(`Chạy lại deployment "${dep.name}"? Sẽ đẩy tới các máy đích.`)) return;
     await api.post(`/deployments/${id}/trigger/`, {});
     load();
   };
   const cancel = async () => {
+    if (!window.confirm(`Hủy deployment "${dep.name}"? Các job đang chạy sẽ bị dừng.`)) return;
     await api.post(`/deployments/${id}/cancel/`, {});
     load();
   };

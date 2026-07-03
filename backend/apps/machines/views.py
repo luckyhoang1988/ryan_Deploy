@@ -60,6 +60,9 @@ class MachineViewSet(viewsets.ModelViewSet):
 class MachineGroupViewSet(viewsets.ModelViewSet):
     queryset = MachineGroup.objects.prefetch_related("machines").all()
     serializer_class = MachineGroupSerializer
+    # Nhóm máy quyết định target của deployment → cùng cấp Tier-0 như Machine: mọi user
+    # đọc được (để chọn target), chỉ admin tạo/sửa/xóa.
+    permission_classes = [IsAdmin]
 
 
 class ADConfigView(APIView):

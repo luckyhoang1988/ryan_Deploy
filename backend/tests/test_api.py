@@ -124,3 +124,27 @@ def test_operator_cannot_create_machine(operator_client):
         content_type="application/json",
     )
     assert r.status_code == 403
+
+
+def test_operator_cannot_create_machine_group(operator_client):
+    # Nhóm máy là Tier-0 (quyết định target deploy) → chỉ admin được tạo/sửa.
+    r = operator_client.post(
+        "/api/machine-groups/",
+        {"name": "Nhóm lạ"},
+        content_type="application/json",
+    )
+    assert r.status_code == 403
+
+
+def test_viewer_can_read_machine_groups(viewer_client):
+    r = viewer_client.get("/api/machine-groups/")
+    assert r.status_code == 200
+
+
+def test_admin_can_create_machine_group(admin_client):
+    r = admin_client.post(
+        "/api/machine-groups/",
+        {"name": "Kế toán"},
+        content_type="application/json",
+    )
+    assert r.status_code == 201

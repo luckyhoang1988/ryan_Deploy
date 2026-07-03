@@ -1,6 +1,30 @@
 import io
 
+import pytest
+from rest_framework.serializers import ValidationError
+
 from apps.packages import repository
+from apps.packages.serializers import PackageVersionSerializer
+
+
+class _FakeUpload:
+    def __init__(self, size):
+        self.size = size
+
+
+def test_installer_size_over_limit_rejected(settings):
+    settings.PYDEPLOY = {**settings.PYDEPLOY, "MAX_INSTALLER_MB": 1}
+    s = PackageVersionSerializer()
+    with pytest.raises(ValidationError):
+        s.validate_installer_file(_FakeUpload(2 * 1024 * 1024))  # 2MB > 1MB
+
+
+def test_installer_size_within_limit_ok(settings):
+    settings.PYDEPLOY = {**settings.PYDEPLOY, "MAX_INSTALLER_MB": 10}
+    s = PackageVersionSerializer()
+    upload = _FakeUpload(1 * 1024 * 1024)  # 1MB < 10MB
+    assert s.validate_installer_file(upload) is upload
+    assert s.validate_installer_file(None) is None  # update không đổi file → bỏ qua
 
 
 def test_detect_installer_type():

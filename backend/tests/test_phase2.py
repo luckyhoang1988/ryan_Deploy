@@ -167,7 +167,7 @@ def test_reconcile_finalizes_stuck_running(package_version, credential):
 
     result = dep_tasks.reconcile_stuck_deployments()
 
-    assert result == {"reconciled": 1}
+    assert result == {"reconciled": 1, "failed": 0}
     dep.refresh_from_db()
     assert dep.status == DeploymentStatus.COMPLETED
 
@@ -178,6 +178,6 @@ def test_reconcile_skips_active_running(package_version, credential):
 
     result = dep_tasks.reconcile_stuck_deployments()
 
-    assert result == {"reconciled": 0}
+    assert result == {"reconciled": 0, "failed": 0}
     dep.refresh_from_db()
     assert dep.status == DeploymentStatus.RUNNING  # còn job RUNNING → để yên

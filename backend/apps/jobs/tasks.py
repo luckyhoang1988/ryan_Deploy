@@ -89,6 +89,11 @@ def _run_job(self, job, deployment, machine, credential, pv):
         # Cập nhật step hiện tại (nhẹ, chỉ 1 field)
         Job.objects.filter(pk=job.pk).update(current_step=step)
 
+    def is_cancelled():
+        # Poll trạng thái CANCELLED giữa các bước (đặc biệt trong vòng chờ collect dài) để
+        # dừng đẩy hợp tác — bổ sung cho revoke(terminate) vốn không chắc dừng sạch.
+        return Job.objects.filter(pk=job.pk, status=JobStatus.CANCELLED).exists()
+
     executor = PushExecutor(
         host=machine.target_address,
         username=credential.username,
@@ -96,6 +101,7 @@ def _run_job(self, job, deployment, machine, credential, pv):
         domain=credential.domain,
         timeout=_job_timeout(),
         progress_cb=progress,
+        cancel_check=is_cancelled,
     )
 
     installer_path = pv.installer_file.path
@@ -108,6 +114,13 @@ def _run_job(self, job, deployment, machine, credential, pv):
         success_exit_codes=pv.success_exit_codes or [0, 3010],
         job_token=f"job{job.pk}",
     )
+
+    # Bị hủy giữa chừng (cancel_check kích hoạt hoặc revoke đặt CANCELLED) → giữ nguyên
+    # CANCELLED, KHÔNG ghi đè FAILED cũng không retry. Đọc lại trạng thái mới nhất từ DB.
+    job.refresh_from_db(fields=["status"])
+    if job.status == JobStatus.CANCELLED:
+        logger.info("Job %s bị hủy trong lúc chạy — dừng", job_id)
+        return {"job_id": job_id, "status": "cancelled"}
 
     # --- Ghi kết quả ---
     job.exit_code = result.exit_code
@@ -131,7 +144,8 @@ def _run_job(self, job, deployment, machine, credential, pv):
     # --- Thất bại: quyết định retry ---
     # Đếm số lần thử THẬT qua job.attempts (không dùng self.request.retries vì retries
     # còn tính cả những lần chờ slot concurrency, không phải lỗi thật).
-    transient = result.step_reached in _TRANSIENT_STEPS
+    # result.retryable=False cho lỗi chắc chắn không tự khỏi (vd sai credential) → không retry.
+    transient = result.step_reached in _TRANSIENT_STEPS and result.retryable
     if transient and job.attempts <= deployment.retry_limit:
         job.status = JobStatus.QUEUED
         job.save()

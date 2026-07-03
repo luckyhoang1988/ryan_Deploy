@@ -1,3 +1,4 @@
+from django.conf import settings
 from rest_framework import serializers
 
 from . import repository
@@ -6,6 +7,18 @@ from .models import Package, PackageVersion
 
 class PackageVersionSerializer(serializers.ModelSerializer):
     package_name = serializers.CharField(source="package.name", read_only=True)
+
+    def validate_installer_file(self, upload):
+        # Chặn upload installer quá lớn (đầy đĩa repository). None xảy ra khi update không
+        # đổi file → bỏ qua.
+        if upload is None:
+            return upload
+        max_mb = settings.PYDEPLOY.get("MAX_INSTALLER_MB", 2048)
+        if upload.size > max_mb * 1024 * 1024:
+            raise serializers.ValidationError(
+                f"File installer {upload.size / (1024 * 1024):.0f} MB vượt giới hạn {max_mb} MB."
+            )
+        return upload
 
     class Meta:
         model = PackageVersion

@@ -10,6 +10,11 @@ from .orchestrator import launch_deployment
 
 logger = logging.getLogger("apps.deployments")
 
+# Deployment RUNNING mà quá lâu vẫn CHƯA có job nào (launch chết giữa chừng, hoặc process
+# bị kill sau khi claim SCHEDULED→RUNNING nhưng trước khi tạo job) → coi là kẹt, đánh FAILED.
+# launch tạo job trong vài giây nên ngưỡng này chỉ chạm khi thực sự có sự cố.
+_STUCK_NO_JOB_SECONDS = 600  # 10 phút
+
 
 @shared_task
 def trigger_scheduled_deployments():
@@ -31,16 +36,28 @@ def trigger_scheduled_deployments():
 
     launched = 0
     for dep_id in due_ids:
-        # Claim nguyên tử: chỉ đúng 1 tiến trình đổi được SCHEDULED→RUNNING.
+        # Claim nguyên tử: chỉ đúng 1 tiến trình đổi được SCHEDULED→RUNNING. Đặt luôn
+        # started_at làm mốc "RUNNING từ lúc" tin cậy để reconcile phát hiện kẹt (claim
+        # bằng .update() không kích hoạt auto_now nên không dựa được vào updated_at).
         with transaction.atomic():
             claimed = (
                 Deployment.objects.filter(id=dep_id, status=DeploymentStatus.SCHEDULED)
-                .update(status=DeploymentStatus.RUNNING)
+                .update(status=DeploymentStatus.RUNNING, started_at=now)
             )
         if not claimed:
             continue
         deployment = Deployment.objects.get(id=dep_id)
-        count = launch_deployment(deployment)
+        # launch_deployment có thể ném lỗi (DB, broker Celery…) giữa lúc đã RUNNING → phải
+        # revert về FAILED, nếu không deployment kẹt RUNNING vĩnh viễn (reconcile bỏ qua
+        # case chưa có job trong thời gian gia hạn).
+        try:
+            count = launch_deployment(deployment)
+        except Exception:
+            logger.exception("launch_deployment lỗi cho %s → đánh FAILED", dep_id)
+            deployment.status = DeploymentStatus.FAILED
+            deployment.finished_at = timezone.now()
+            deployment.save(update_fields=["status", "finished_at"])
+            continue
         if count == 0:
             # Không có máy đích enabled → không có gì để chạy, đóng lại tránh kẹt RUNNING.
             deployment.status = DeploymentStatus.COMPLETED
@@ -72,17 +89,31 @@ def reconcile_stuck_deployments():
         JobStatus.SKIPPED,
         JobStatus.CANCELLED,
     ]
+    now = timezone.now()
     reconciled = 0
-    for dep_id in Deployment.objects.filter(status=DeploymentStatus.RUNNING).values_list(
-        "id", flat=True
-    ):
+    failed = 0
+    for dep_id, started_at in Deployment.objects.filter(
+        status=DeploymentStatus.RUNNING
+    ).values_list("id", "started_at"):
         jobs = Job.objects.filter(deployment_id=dep_id)
         if not jobs.exists():
-            continue  # vừa chuyển RUNNING, job chưa kịp tạo → để yên
+            # Bình thường job xuất hiện trong vài giây. Nếu đã RUNNING quá lâu mà vẫn
+            # chưa có job → launch chết giữa chừng / process bị kill sau khi claim →
+            # đánh FAILED để không kẹt vĩnh viễn. Trong thời gian gia hạn thì để yên.
+            age = (now - started_at).total_seconds() if started_at else None
+            if age is not None and age > _STUCK_NO_JOB_SECONDS:
+                Deployment.objects.filter(id=dep_id).update(
+                    status=DeploymentStatus.FAILED, finished_at=now
+                )
+                failed += 1
+                logger.warning(
+                    "Reconcile: deployment %s RUNNING %.0fs mà chưa có job → FAILED", dep_id, age
+                )
+            continue
         if jobs.exclude(status__in=terminal).exists():
             continue  # còn job đang chạy → chưa xong, không đụng
         finalize_deployment(None, dep_id)
         reconciled += 1
         logger.info("Reconcile: tổng kết lại deployment kẹt RUNNING %s", dep_id)
 
-    return {"reconciled": reconciled}
+    return {"reconciled": reconciled, "failed": failed}

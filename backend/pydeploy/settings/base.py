@@ -134,6 +134,7 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_THROTTLE_RATES": {
         "login": "10/min",  # chống brute-force đăng nhập
+        "deployment_action": "30/min",  # chống spam trigger/cancel deployment
     },
 }
 
@@ -166,7 +167,14 @@ PYDEPLOY = {
     "SERVICE_PREFIX": env("PYDEPLOY_SERVICE_PREFIX", "PyDeployRunner"),
     "MAX_CONCURRENCY": env_int("PYDEPLOY_MAX_CONCURRENCY", 15),
     "JOB_TIMEOUT": env_int("PYDEPLOY_JOB_TIMEOUT", 1800),
+    # Trần kích thước file installer được upload (MB) — chặn làm đầy đĩa. Django stream
+    # file lớn ra temp disk (không nạp hết RAM) nên đây là giới hạn dung lượng, không phải RAM.
+    "MAX_INSTALLER_MB": env_int("PYDEPLOY_MAX_INSTALLER_MB", 2048),
 }
+
+# Chặn body form phi-file quá lớn (không áp cho file upload — file đã có trần riêng ở
+# serializer PackageVersion). Mặc định Django là 2.5MB; giữ nguyên mức đó cho rõ ràng.
+DATA_UPLOAD_MAX_MEMORY_SIZE = 2621440  # 2.5 MB
 
 # --- Active Directory (Phase 5) ---
 AD = {
