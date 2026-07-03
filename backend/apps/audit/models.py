@@ -14,6 +14,8 @@ class AuditLog(models.Model):
         CREDENTIAL_UPDATE = "credential_update", "Sửa credential"
         CREDENTIAL_DELETE = "credential_delete", "Xóa credential"
         DEPLOYMENT_CREATE = "deployment_create", "Tạo deployment"
+        DEPLOYMENT_UPDATE = "deployment_update", "Sửa deployment"
+        DEPLOYMENT_DELETE = "deployment_delete", "Xóa deployment"
         DEPLOYMENT_TRIGGER = "deployment_trigger", "Kích hoạt deployment"
         DEPLOYMENT_CANCEL = "deployment_cancel", "Hủy deployment"
         JOB_START = "job_start", "Bắt đầu job"

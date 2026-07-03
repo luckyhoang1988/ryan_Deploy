@@ -4,6 +4,7 @@ from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
@@ -62,6 +63,37 @@ class DeploymentViewSet(viewsets.ModelViewSet):
             user=self.request.user,
             target=deployment,
             name=deployment.name,
+        )
+
+    def perform_update(self, serializer):
+        # Không cho sửa deployment đang chạy (cấu hình đang được orchestrator dùng).
+        if serializer.instance.status == DeploymentStatus.RUNNING:
+            raise ValidationError(
+                "Không thể sửa deployment đang chạy. Hãy hủy (cancel) trước."
+            )
+        deployment = serializer.save()
+        AuditLog.record(
+            AuditLog.Action.DEPLOYMENT_UPDATE,
+            user=self.request.user,
+            target=deployment,
+            name=deployment.name,
+        )
+
+    def perform_destroy(self, instance):
+        # Chặn xóa khi đang chạy — job đang đẩy tới máy, xóa sẽ bỏ rơi tác vụ nền.
+        if instance.status == DeploymentStatus.RUNNING:
+            raise ValidationError(
+                "Không thể xóa deployment đang chạy. Hãy hủy (cancel) trước rồi xóa."
+            )
+        name = instance.name
+        saved_pk = instance.pk
+        instance.delete()  # Job liên quan CASCADE tự xóa theo.
+        instance.pk = saved_pk  # giữ target_id cho bản ghi audit sau khi delete()
+        AuditLog.record(
+            AuditLog.Action.DEPLOYMENT_DELETE,
+            user=self.request.user,
+            target=instance,
+            name=name,
         )
 
     @action(detail=True, methods=["post"])

@@ -2,11 +2,16 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, listOf, fetchAll } from "../api";
 import { StatusBadge } from "../components/Layout";
+import { useAuth } from "../auth";
 
 export default function Deployments() {
+  const { hasRole } = useAuth();
+  const canWrite = hasRole("operator", "admin");
   const [deployments, setDeployments] = useState([]);
   const [showWizard, setShowWizard] = useState(false);
+  const [editDep, setEditDep] = useState(null);
   const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
 
   const load = () =>
     api.get("/deployments/").then((d) => setDeployments(listOf(d))).catch((e) => setErr(e.message));
@@ -15,12 +20,23 @@ export default function Deployments() {
     load();
   }, []);
 
+  const remove = async (d) => {
+    if (!confirm(`Xóa deployment "${d.name}"? Toàn bộ lịch sử job của nó cũng bị xóa.`)) return;
+    setErr(""); setMsg("");
+    try {
+      await api.del(`/deployments/${d.id}/`);
+      setMsg(`Đã xóa "${d.name}".`);
+      load();
+    } catch (e) { setErr(e.message); }
+  };
+
   return (
     <div>
       <div className="topbar">
         <h2>Deployments</h2>
-        <button className="btn" onClick={() => setShowWizard(true)}>+ Tạo deployment</button>
+        {canWrite && <button className="btn" onClick={() => setShowWizard(true)}>+ Tạo deployment</button>}
       </div>
+      {msg && <p className="muted">{msg}</p>}
       {err && <p className="error">{err}</p>}
       <table>
         <thead>
@@ -33,15 +49,102 @@ export default function Deployments() {
               <td>{d.package_name} {d.version}</td>
               <td><StatusBadge status={d.status} /></td>
               <td className="muted">{d.success_count}✓ / {d.failed_count}✗ / {d.total_count} máy</td>
-              <td><Link to={`/deployments/${d.id}`}>Chi tiết →</Link></td>
+              <td>
+                <div className="row" style={{ gap: 10, justifyContent: "flex-end" }}>
+                  <Link to={`/deployments/${d.id}`}>Chi tiết →</Link>
+                  {canWrite && (
+                    <>
+                      <button className="btn ghost" style={{ padding: "4px 10px" }} onClick={() => setEditDep(d)}>Sửa</button>
+                      <button className="btn ghost danger" style={{ padding: "4px 10px" }} onClick={() => remove(d)}>Xóa</button>
+                    </>
+                  )}
+                </div>
+              </td>
             </tr>
           ))}
           {deployments.length === 0 && <tr><td colSpan="5" className="muted">Chưa có deployment.</td></tr>}
         </tbody>
       </table>
       {showWizard && (
-        <Wizard onClose={() => setShowWizard(false)} onDone={() => { setShowWizard(false); load(); }} />
+        <Wizard onClose={() => setShowWizard(false)} onDone={() => { setShowWizard(false); setMsg("Đã tạo deployment."); load(); }} />
       )}
+      {editDep && (
+        <EditModal
+          dep={editDep}
+          onClose={() => setEditDep(null)}
+          onDone={() => { setEditDep(null); setMsg("Đã lưu deployment."); load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Định dạng datetime cho input datetime-local (yyyy-MM-ddThh:mm, theo giờ địa phương).
+function toLocalInput(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function EditModal({ dep, onClose, onDone }) {
+  const [form, setForm] = useState({
+    name: dep.name || "",
+    scheduled_at: toLocalInput(dep.scheduled_at),
+    max_concurrency: dep.max_concurrency ?? 15,
+    retry_limit: dep.retry_limit ?? 1,
+  });
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setErr(""); setBusy(true);
+    try {
+      await api.patch(`/deployments/${dep.id}/`, {
+        name: form.name,
+        // datetime-local không có timezone → new Date() diễn giải theo giờ máy, gửi ISO UTC.
+        scheduled_at: form.scheduled_at ? new Date(form.scheduled_at).toISOString() : null,
+        max_concurrency: Number(form.max_concurrency) || 1,
+        retry_limit: Number(form.retry_limit) || 0,
+      });
+      onDone();
+    } catch (e2) {
+      setErr(e2.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+        <h3>Sửa deployment</h3>
+        <label>Tên</label>
+        <input value={form.name} onChange={set("name")} required />
+        <label>Lịch chạy (để trống = chạy ngay khi kích hoạt)</label>
+        <input type="datetime-local" value={form.scheduled_at} onChange={set("scheduled_at")} />
+        <div className="row" style={{ gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <label>Số máy chạy song song</label>
+            <input type="number" min="1" value={form.max_concurrency} onChange={set("max_concurrency")} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label>Số lần thử lại</label>
+            <input type="number" min="0" value={form.retry_limit} onChange={set("retry_limit")} />
+          </div>
+        </div>
+        <p className="muted" style={{ fontSize: 12, marginTop: -4 }}>
+          Không sửa được deployment đang chạy — hãy hủy trước. Đổi máy đích/package thì tạo deployment mới.
+        </p>
+        {err && <p className="error mt">{err}</p>}
+        <div className="row spread mt">
+          <button type="button" className="btn ghost" onClick={onClose}>Hủy</button>
+          <button className="btn" disabled={busy}>{busy ? "Đang lưu…" : "Lưu"}</button>
+        </div>
+      </form>
     </div>
   );
 }

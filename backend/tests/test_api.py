@@ -264,3 +264,67 @@ def test_delete_version_referenced_by_deployment_blocked(admin_client):
     r = admin_client.delete(f"/api/package-versions/{vid}/")
     assert r.status_code == 400
     assert PackageVersion.objects.filter(id=vid).exists()
+
+
+# --- Sửa/Xóa deployment ---
+
+
+def _make_deployment(status="draft"):
+    """Tạo trực tiếp một deployment (bỏ qua wizard) để test sửa/xóa."""
+    from apps.credentials.models import DeployCredential
+    from apps.deployments.models import Deployment
+
+    cred = DeployCredential.objects.create(name=f"c-{status}", username="u")
+    return Deployment.objects.create(name="dep", credential=cred, action="inventory", status=status)
+
+
+def test_operator_update_deployment_audited(operator_client):
+    from apps.audit.models import AuditLog
+
+    dep = _make_deployment()
+    r = operator_client.patch(
+        f"/api/deployments/{dep.id}/", {"name": "dep-renamed"}, content_type="application/json"
+    )
+    assert r.status_code == 200, r.content
+    assert r.json()["name"] == "dep-renamed"
+    assert AuditLog.objects.filter(action=AuditLog.Action.DEPLOYMENT_UPDATE, target_id=str(dep.id)).exists()
+
+
+def test_operator_delete_deployment_cascades_jobs_and_audits(operator_client):
+    from apps.audit.models import AuditLog
+    from apps.deployments.models import Deployment
+    from apps.jobs.models import Job
+    from apps.machines.models import Machine
+
+    dep = _make_deployment()
+    machine = Machine.objects.create(hostname="PC-DEL")
+    Job.objects.create(deployment=dep, machine=machine)
+
+    r = operator_client.delete(f"/api/deployments/{dep.id}/")
+    assert r.status_code == 204
+    assert not Deployment.objects.filter(id=dep.id).exists()
+    assert not Job.objects.filter(deployment_id=dep.id).exists()  # CASCADE
+    assert AuditLog.objects.filter(action=AuditLog.Action.DEPLOYMENT_DELETE, target_id=str(dep.id)).exists()
+
+
+def test_cannot_delete_running_deployment(operator_client):
+    from apps.deployments.models import Deployment
+
+    dep = _make_deployment(status="running")
+    r = operator_client.delete(f"/api/deployments/{dep.id}/")
+    assert r.status_code == 400
+    assert Deployment.objects.filter(id=dep.id).exists()
+
+
+def test_cannot_update_running_deployment(operator_client):
+    dep = _make_deployment(status="running")
+    r = operator_client.patch(
+        f"/api/deployments/{dep.id}/", {"name": "nope"}, content_type="application/json"
+    )
+    assert r.status_code == 400
+
+
+def test_viewer_cannot_delete_deployment(viewer_client):
+    dep = _make_deployment()
+    r = viewer_client.delete(f"/api/deployments/{dep.id}/")
+    assert r.status_code == 403
