@@ -43,7 +43,8 @@ services:
     volumes:
       - media:/app/media
     ports:
-      - "8000:8000"
+      # Chỉ mở cho nginx trên host (reverse proxy + TLS); không lộ HTTP thuần ra LAN.
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy

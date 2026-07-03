@@ -18,7 +18,8 @@ impacket==0.12.0
 ldap3==2.9.1
 
 # --- Credential vault (encryption at-rest) ---
-cryptography==44.0.0
+# Bị chặn <43 bởi impacket 0.12.0 (ghim pyOpenSSL==24.0.0 -> cryptography<43).
+cryptography==42.0.8
 
 # --- Server ---
 gunicorn==23.0.0
