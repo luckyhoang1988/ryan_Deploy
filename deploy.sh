@@ -19,10 +19,10 @@
 set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────
-# Thư mục triển khai trên server vẫn tên /opt/pydeploy (chỉ module Django đã đổi
-# sang ryandeploy; server giữ cả 2 dir module + ghim POSTGRES_DB=pydeploy).
+# Thư mục triển khai trên server: /opt/ryandeploy (đã cutover hoàn toàn khỏi pydeploy —
+# module Django, DB/role Postgres, volume, nginx đều dùng tên ryandeploy).
 SSH_HOST="ryandeploy"
-REMOTE_ROOT="/opt/pydeploy"
+REMOTE_ROOT="/opt/ryandeploy"
 COMPOSE="docker compose -f docker-compose.prod.yml -f docker-compose.host.yml"
 
 # Chuyển về thư mục chứa script (thư mục gốc repo) dù gọi từ đâu.
