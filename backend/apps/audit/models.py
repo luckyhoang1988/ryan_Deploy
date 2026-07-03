@@ -8,6 +8,8 @@ class AuditLog(models.Model):
     class Action(models.TextChoices):
         PACKAGE_UPLOAD = "package_upload", "Upload package"
         CREDENTIAL_CREATE = "credential_create", "Tạo credential"
+        CREDENTIAL_UPDATE = "credential_update", "Sửa credential"
+        CREDENTIAL_DELETE = "credential_delete", "Xóa credential"
         DEPLOYMENT_CREATE = "deployment_create", "Tạo deployment"
         DEPLOYMENT_TRIGGER = "deployment_trigger", "Kích hoạt deployment"
         DEPLOYMENT_CANCEL = "deployment_cancel", "Hủy deployment"

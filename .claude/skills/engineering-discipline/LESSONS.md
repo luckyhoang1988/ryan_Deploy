@@ -14,6 +14,18 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-03 — JsonFormatter: lọc field `extra` bằng danh sách reserved của LogRecord
+**Bối cảnh:** Viết JsonFormatter opt-in (env DJANGO_LOG_JSON) để log JSON cho ELK/Datadog.
+Muốn gộp field `extra` (vd `logger.info(..., extra={"job_id": 5})`) vào JSON nhưng không
+biết field nào là chuẩn của LogRecord, field nào do người dùng thêm.
+**Bài học:** `logging.makeLogRecord({}).__dict__.keys()` cho đúng bộ field chuẩn của một
+LogRecord rỗng → lấy hiệu để tách `extra`. Nhớ bù thêm `message`/`asctime`/`taskName`
+(được sinh lúc format, không có trong record rỗng). Thêm CHOICES vào CharField (vd
+AuditLog.Action) VẪN sinh migration AlterField dù không đổi schema DB — phải chạy
+makemigrations, nếu không `check`/CI báo "changes not reflected".
+**Áp dụng:** Formatter/serializer log tuỳ biến: đừng hardcode danh sách field chuẩn — suy
+ra từ record rỗng. Mọi thay đổi choices/help_text/verbose_name của field đều cần migration.
+
 ## 2026-07-03 — Hardening trigger/cancel: hai gotcha (update() bỏ auto_now, progress_cb nuốt exception)
 **Bối cảnh:** Fix deployment kẹt RUNNING khi launch_deployment ném lỗi, và cancel giữa
 chừng không dừng được executor đang chạy (chờ collect tới 30 phút).

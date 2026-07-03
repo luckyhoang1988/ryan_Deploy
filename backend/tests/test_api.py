@@ -72,6 +72,41 @@ def test_admin_creates_credential_password_hidden(admin_client):
     assert cred.get_password() == "secret"
 
 
+def test_admin_update_credential_audited(admin_client):
+    from apps.audit.models import AuditLog
+
+    r = admin_client.post(
+        "/api/credentials/",
+        {"name": "svc", "username": "u", "password": "p"},
+        content_type="application/json",
+    )
+    cid = r.json()["id"]
+    r2 = admin_client.patch(
+        f"/api/credentials/{cid}/", {"name": "svc-renamed"}, content_type="application/json"
+    )
+    assert r2.status_code == 200
+    assert AuditLog.objects.filter(
+        action=AuditLog.Action.CREDENTIAL_UPDATE, target_id=str(cid)
+    ).exists()
+
+
+def test_admin_delete_credential_audited(admin_client):
+    from apps.audit.models import AuditLog
+
+    r = admin_client.post(
+        "/api/credentials/",
+        {"name": "throwaway", "username": "u", "password": "p"},
+        content_type="application/json",
+    )
+    cid = r.json()["id"]
+    r2 = admin_client.delete(f"/api/credentials/{cid}/")
+    assert r2.status_code == 204
+    # Log ghi TRƯỚC khi xóa nên vẫn giữ được target_id/tên.
+    assert AuditLog.objects.filter(
+        action=AuditLog.Action.CREDENTIAL_DELETE, target_id=str(cid)
+    ).exists()
+
+
 def test_viewer_cannot_create_credential(viewer_client):
     r = viewer_client.post(
         "/api/credentials/",

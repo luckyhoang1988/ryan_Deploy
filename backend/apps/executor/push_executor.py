@@ -202,6 +202,13 @@ class PushExecutor:
 
     # ------------------------------------------------------------- step impls
     def _precheck(self):
+        # 1) Phân giải DNS trước — tách lỗi "không resolve được tên máy" (sai hostname/OU
+        #    cũ) khỏi lỗi "cổng 445 đóng" (firewall/tắt máy), để ops chẩn đoán nhanh.
+        try:
+            socket.getaddrinfo(self.host, self.smb_port, proto=socket.IPPROTO_TCP)
+        except socket.gaierror as e:
+            raise ExecutorError(f"Không phân giải được tên máy '{self.host}' (DNS): {e}")
+        # 2) Kiểm tra cổng SMB 445 có mở không.
         try:
             with socket.create_connection((self.host, self.smb_port), timeout=10):
                 pass

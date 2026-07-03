@@ -58,3 +58,15 @@ def test_abort_if_cancelled_swallows_check_error():
         raise RuntimeError("db lỗi")
 
     _ex(cancel_check=boom)._abort_if_cancelled()  # không ném ra ngoài
+
+
+def test_precheck_dns_failure(monkeypatch):
+    # DNS không resolve → lỗi rõ ràng nhắc DNS, tách khỏi lỗi cổng đóng.
+    import socket
+
+    def boom(*a, **k):
+        raise socket.gaierror("Name or service not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", boom)
+    with pytest.raises(ExecutorError, match="DNS"):
+        _ex()._precheck()

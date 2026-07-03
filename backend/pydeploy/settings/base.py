@@ -207,7 +207,10 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
-# --- Logging (JSON-ish console) ---
+# --- Logging ---
+# DJANGO_LOG_JSON=true → mỗi dòng 1 object JSON (ELK/Datadog/Loki). Mặc định dùng format
+# người-đọc cho dev.
+LOG_JSON = env_bool("DJANGO_LOG_JSON", False)
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
@@ -216,11 +219,14 @@ LOGGING = {
             "format": "{asctime} [{levelname}] {name}: {message}",
             "style": "{",
         },
+        "json": {
+            "()": "pydeploy.logformat.JsonFormatter",
+        },
     },
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
-            "formatter": "verbose",
+            "formatter": "json" if LOG_JSON else "verbose",
         },
     },
     "root": {"handlers": ["console"], "level": "INFO"},

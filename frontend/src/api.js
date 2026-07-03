@@ -5,6 +5,28 @@ function getCookie(name) {
   return m ? m.pop() : "";
 }
 
+// Trích thông điệp lỗi dễ đọc từ body lỗi DRF. DRF trả nhiều dạng:
+//   {detail: "..."}                       → lỗi quyền/404/throttle
+//   {field: ["msg"], other: ["msg"]}      → lỗi validation (400) — trước đây bị nuốt
+//   {non_field_errors: ["..."]}           → lỗi mức form
+//   ["msg", ...]                          → list lỗi thô
+function extractError(data, status) {
+  if (data == null) return `Lỗi ${status}`;
+  if (typeof data === "string") return data;
+  if (data.detail) return data.detail;
+  if (Array.isArray(data)) return data.join(" ");
+  if (typeof data === "object") {
+    const parts = [];
+    for (const [field, val] of Object.entries(data)) {
+      const msg = Array.isArray(val) ? val.join(" ") : String(val);
+      // non_field_errors: bỏ tiền tố field cho gọn; còn lại ghi rõ tên field.
+      parts.push(field === "non_field_errors" ? msg : `${field}: ${msg}`);
+    }
+    if (parts.length) return parts.join(" · ");
+  }
+  return `Lỗi ${status}`;
+}
+
 async function request(method, path, body, isForm = false) {
   const headers = {};
   if (!isForm) headers["Content-Type"] = "application/json";
@@ -20,7 +42,7 @@ async function request(method, path, body, isForm = false) {
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.detail || `Lỗi ${res.status}`);
+    throw new Error(extractError(data, res.status));
   }
   return data;
 }

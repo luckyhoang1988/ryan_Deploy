@@ -19,3 +19,19 @@ class DeployCredentialViewSet(viewsets.ModelViewSet):
         AuditLog.record(
             AuditLog.Action.CREDENTIAL_CREATE, user=self.request.user, target=cred, name=cred.name
         )
+
+    def perform_update(self, serializer):
+        cred = serializer.save()
+        AuditLog.record(
+            AuditLog.Action.CREDENTIAL_UPDATE, user=self.request.user, target=cred, name=cred.name
+        )
+
+    def perform_destroy(self, instance):
+        # Ghi log TRƯỚC khi xóa để còn giữ được tên/pk trong bản ghi kiểm toán.
+        AuditLog.record(
+            AuditLog.Action.CREDENTIAL_DELETE,
+            user=self.request.user,
+            target=instance,
+            name=instance.name,
+        )
+        instance.delete()

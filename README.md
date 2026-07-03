@@ -116,9 +116,11 @@ celery -A pydeploy worker -l info                     # terminal khác
 - `manage.py check` — no issues.
 - `makemigrations` + `migrate` (sqlite test settings) — OK.
 - Smoke test: vault roundtrip, repository detect/checksum, executor path + `{file}` substitution — PASS.
-- **pytest: 24/24 PASS** — vault, repository + verify_integrity (chống tamper), executor path/command,
-  permissions/RBAC, và API (login, stats, credential mã hóa + không lộ password, viewer bị chặn 403, chặn ẩn danh).
-  Chạy: `cd backend && pytest` (cài `pip install -r requirements-dev.txt`).
+- **pytest: 77/77 PASS** — vault, repository + verify_integrity (chống tamper), executor
+  path/command + DNS precheck + phân loại lỗi auth/hủy, permissions/RBAC (gồm nhóm máy),
+  semaphore concurrency, scheduling/reconcile (kẹt RUNNING, timeout), log JSON, và API
+  (login, stats, credential mã hóa + audit create/update/delete, viewer bị chặn 403, chặn ẩn danh).
+  Chạy: `cd backend && DJANGO_SETTINGS_MODULE=pydeploy.settings.test pytest` (cài `pip install -r requirements-dev.txt`).
 - Frontend `npm run build` — build thành công (0 lỗi).
 
 > Test **end-to-end đẩy thật** cần 1 máy Windows lab trong domain (xem mục Verification #1/#2 trong plan) — chưa chạy trong môi trường này vì không có máy đích.
