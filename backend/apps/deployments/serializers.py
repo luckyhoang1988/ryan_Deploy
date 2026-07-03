@@ -7,10 +7,29 @@ class DeploymentSerializer(serializers.ModelSerializer):
     package_name = serializers.CharField(source="package_version.package.name", read_only=True)
     version = serializers.CharField(source="package_version.version", read_only=True)
 
-    total_count = serializers.IntegerField(read_only=True)
-    success_count = serializers.IntegerField(read_only=True)
-    failed_count = serializers.IntegerField(read_only=True)
-    pending_count = serializers.IntegerField(read_only=True)
+    # Ưu tiên giá trị annotate từ queryset list (n_*, tránh N+1); nếu vắng (vd response
+    # sau create — instance chưa qua annotate) thì fallback về property của model.
+    total_count = serializers.SerializerMethodField()
+    success_count = serializers.SerializerMethodField()
+    failed_count = serializers.SerializerMethodField()
+    pending_count = serializers.SerializerMethodField()
+
+    @staticmethod
+    def _count(obj, annotated, prop):
+        value = getattr(obj, annotated, None)
+        return value if value is not None else getattr(obj, prop)
+
+    def get_total_count(self, obj):
+        return self._count(obj, "n_total", "total_count")
+
+    def get_success_count(self, obj):
+        return self._count(obj, "n_success", "success_count")
+
+    def get_failed_count(self, obj):
+        return self._count(obj, "n_failed", "failed_count")
+
+    def get_pending_count(self, obj):
+        return self._count(obj, "n_pending", "pending_count")
 
     class Meta:
         model = Deployment

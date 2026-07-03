@@ -189,6 +189,14 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.machines.tasks.sync_from_ad",
         "schedule": crontab(hour=2, minute=0),  # 02:00 hằng đêm
     },
+    "trigger-scheduled-deployments": {
+        "task": "apps.deployments.tasks.trigger_scheduled_deployments",
+        "schedule": 60.0,  # mỗi phút: kích hoạt deployment đã tới giờ hẹn
+    },
+    "reconcile-stuck-deployments": {
+        "task": "apps.deployments.tasks.reconcile_stuck_deployments",
+        "schedule": 300.0,  # mỗi 5 phút: gỡ deployment kẹt RUNNING nếu chord callback không chạy
+    },
 }
 
 # --- Logging (JSON-ish console) ---

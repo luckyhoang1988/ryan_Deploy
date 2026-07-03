@@ -3,8 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.audit.models import AuditLog
-from apps.core.permissions import IsAdmin
+from apps.core.permissions import IsAdmin, IsViewerOrAbove
 
 from .ad_sync import test_ad_connection
 from .models import ADConfig, Machine, MachineGroup
@@ -16,6 +15,14 @@ class MachineViewSet(viewsets.ModelViewSet):
     queryset = Machine.objects.all()
     serializer_class = MachineSerializer
     filterset_fields = ["is_online", "enabled", "ad_ou"]
+    # Mặc định chỉ admin được sửa danh sách máy / sync AD (Tier-0).
+    permission_classes = [IsAdmin]
+
+    def get_permissions(self):
+        # check_online chỉ đọc trạng thái online → operator cũng được (không cần admin).
+        if self.action == "check_online":
+            return [IsViewerOrAbove()]
+        return super().get_permissions()
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -29,20 +36,25 @@ class MachineViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"])
     def sync_ad(self, request):
-        """Đồng bộ máy từ Active Directory. Body tùy chọn: {"search_ou": "OU=..."}"""
+        """
+        Đồng bộ máy từ Active Directory (chạy nền — LDAP có thể chậm, không chặn web worker).
+        Body tùy chọn: {"search_ou": "OU=..."}. Trả task_id để client poll /api/tasks/<id>/.
+        """
         search_ou = request.data.get("search_ou")
-        result = sync_from_ad(search_ou=search_ou)
-        AuditLog.record(
-            AuditLog.Action.MACHINE_SYNC, user=request.user, search_ou=search_ou or "", **result
+        task = sync_from_ad.delay(search_ou, request.user.id)
+        return Response(
+            {"detail": "Đã bắt đầu đồng bộ AD (chạy nền).", "task_id": task.id},
+            status=status.HTTP_202_ACCEPTED,
         )
-        code = status.HTTP_200_OK if not result.get("error") else status.HTTP_400_BAD_REQUEST
-        return Response(result, status=code)
 
     @action(detail=False, methods=["post"])
     def check_online(self, request):
-        """Kiểm tra trạng thái online của tất cả máy ngay lập tức."""
-        result = check_all_online()
-        return Response(result, status=status.HTTP_200_OK)
+        """Kiểm tra online toàn bộ máy (chạy nền — ping nhiều máy có thể lâu)."""
+        task = check_all_online.delay()
+        return Response(
+            {"detail": "Đang kiểm tra online (chạy nền).", "task_id": task.id},
+            status=status.HTTP_202_ACCEPTED,
+        )
 
 
 class MachineGroupViewSet(viewsets.ModelViewSet):

@@ -14,6 +14,7 @@ from apps.jobs.models import Job, JobStatus
 from apps.jobs.tasks import deploy_to_machine, finalize_deployment
 
 from .models import DeploymentStatus
+from .semaphore import clear_slots
 
 logger = logging.getLogger("apps.deployments")
 
@@ -26,6 +27,9 @@ def launch_deployment(deployment) -> int:
     machines = list(deployment.target_machines.filter(enabled=True))
     if not machines:
         return 0
+
+    # Reset bộ đếm concurrency phòng khi còn sót từ lần chạy trước (re-trigger).
+    clear_slots(deployment.id)
 
     # Tạo/khởi tạo lại Job cho từng máy
     job_ids = []
@@ -72,9 +76,12 @@ def cancel_deployment(deployment) -> int:
     count = 0
     for job in pending:
         if job.celery_task_id:
-            app.control.revoke(job.celery_task_id, terminate=False)
+            # terminate=True: giết cả job ĐANG cài dở (SIGTERM) chứ không chỉ chặn job
+            # chưa khởi chạy — hủy deployment phải dừng được cài đặt đang diễn ra.
+            app.control.revoke(job.celery_task_id, terminate=True)
         job.status = JobStatus.CANCELLED
         job.finished_at = timezone.now()
         job.save(update_fields=["status", "finished_at"])
         count += 1
+    clear_slots(deployment.id)
     return count

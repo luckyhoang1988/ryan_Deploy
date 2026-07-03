@@ -77,6 +77,24 @@ def me(request):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+def task_status(request, task_id):
+    """
+    Trạng thái một Celery task (cho các tác vụ nền: sync AD, kiểm tra online...).
+    Client poll đến khi `ready=true` rồi đọc `result`.
+    """
+    from pydeploy.celery import app as celery_app
+
+    res = celery_app.AsyncResult(task_id)
+    payload = {"task_id": task_id, "state": res.state, "ready": res.ready()}
+    if res.successful():
+        payload["result"] = res.result
+    elif res.failed():
+        payload["error"] = str(res.result)
+    return Response(payload)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def stats(request):
     """Số liệu tổng quan cho dashboard."""
     from apps.deployments.models import Deployment

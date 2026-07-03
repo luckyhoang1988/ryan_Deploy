@@ -46,3 +46,14 @@ export function listOf(data) {
   if (Array.isArray(data)) return data;
   return data?.results ?? [];
 }
+
+// Poll một Celery task (tác vụ nền) tới khi xong; trả về payload cuối (có .result / .error).
+export async function waitForTask(taskId, { interval = 1500, timeout = 120000 } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const t = await api.get(`/tasks/${taskId}/`);
+    if (t.ready) return t;
+    await new Promise((r) => setTimeout(r, interval));
+  }
+  throw new Error("Tác vụ nền quá thời gian chờ.");
+}

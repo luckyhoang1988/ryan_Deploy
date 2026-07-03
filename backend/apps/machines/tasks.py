@@ -12,9 +12,22 @@ logger = logging.getLogger("apps.machines")
 
 
 @shared_task(name="apps.machines.tasks.sync_from_ad")
-def sync_from_ad(search_ou: str | None = None):
-    result = sync_computers_from_ad(search_ou=search_ou)
-    return result.as_dict()
+def sync_from_ad(search_ou: str | None = None, user_id: int | None = None):
+    """
+    Đồng bộ máy từ AD (chạy nền để không chặn web worker).
+    Ghi audit tại đây — cả khi kích hoạt từ UI (user_id) lẫn beat nightly (user_id=None).
+    """
+    from apps.audit.models import AuditLog
+
+    data = sync_computers_from_ad(search_ou=search_ou).as_dict()
+
+    user = None
+    if user_id:
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.filter(pk=user_id).first()
+    AuditLog.record(AuditLog.Action.MACHINE_SYNC, user=user, search_ou=search_ou or "", **data)
+    return data
 
 
 @shared_task(name="apps.machines.tasks.check_all_online")

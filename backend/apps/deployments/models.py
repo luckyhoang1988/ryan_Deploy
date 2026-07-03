@@ -58,7 +58,9 @@ class Deployment(TimeStampedModel):
 
     @property
     def success_count(self):
-        return self.jobs.filter(status="success").count()
+        # Bao gồm cả "success_reboot" (exit 3010: cài xong, cần reboot) — nhất quán
+        # với dashboard core/views.py và logic finalize_deployment.
+        return self.jobs.filter(status__in=["success", "success_reboot"]).count()
 
     @property
     def failed_count(self):

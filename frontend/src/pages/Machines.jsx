@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, listOf } from "../api";
+import { api, listOf, waitForTask } from "../api";
 import { useAuth } from "../auth";
 import { StatusBadge } from "../components/Layout";
 
@@ -21,7 +21,10 @@ export default function Machines() {
   const syncAd = async () => {
     setBusy("ad"); setErr(""); setMsg("");
     try {
-      const r = await api.post("/machines/sync_ad/", {});
+      const { task_id } = await api.post("/machines/sync_ad/", {});
+      const t = await waitForTask(task_id);
+      if (t.state === "FAILURE") { setErr(`AD sync: ${t.error}`); return; }
+      const r = t.result || {};
       if (r.error) { setErr(`AD sync: ${r.error}`); return; }
       setMsg(`AD sync: +${r.created} mới, ${r.updated} cập nhật`);
       load();
@@ -31,7 +34,10 @@ export default function Machines() {
   const checkOnline = async () => {
     setBusy("online"); setErr(""); setMsg("");
     try {
-      const r = await api.post("/machines/check_online/", {});
+      const { task_id } = await api.post("/machines/check_online/", {});
+      const t = await waitForTask(task_id);
+      if (t.state === "FAILURE") { setErr(`Online check: ${t.error}`); return; }
+      const r = t.result || {};
       setMsg(`Online check: ${r.online}/${r.checked} máy online`);
       load();
     } catch (e) { setErr(e.message); } finally { setBusy(""); }

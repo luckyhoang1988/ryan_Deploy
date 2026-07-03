@@ -11,6 +11,8 @@ DATABASES = {
 }
 # Chạy Celery đồng bộ khi test
 CELERY_TASK_ALWAYS_EAGER = True
+# Lưu kết quả task chạy eager vào result backend để endpoint /tasks/<id>/ đọc được
+CELERY_TASK_STORE_EAGER_RESULT = True
 
 # Cache in-memory để test không phụ thuộc Redis (throttle dùng cache)
 CACHES = {

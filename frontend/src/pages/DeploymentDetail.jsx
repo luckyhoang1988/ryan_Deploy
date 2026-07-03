@@ -3,6 +3,9 @@ import { useParams, Link } from "react-router-dom";
 import { api, listOf } from "../api";
 import { StatusBadge } from "../components/Layout";
 
+// Deployment ở các trạng thái này đã kết thúc → ngừng poll.
+const TERMINAL = ["completed", "completed_errors", "failed", "cancelled"];
+
 export default function DeploymentDetail() {
   const { id } = useParams();
   const [dep, setDep] = useState(null);
@@ -25,10 +28,14 @@ export default function DeploymentDetail() {
 
   useEffect(() => {
     load();
-    // Poll real-time mỗi 3s khi còn job đang chạy
+  }, [id]);
+
+  // Poll real-time mỗi 3s, nhưng DỪNG khi deployment đã kết thúc (tránh gọi API vô hạn).
+  useEffect(() => {
+    if (!dep || TERMINAL.includes(dep.status)) return;
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
-  }, [id]);
+  }, [id, dep?.status]);
 
   const retrigger = async () => {
     await api.post(`/deployments/${id}/trigger/`, {});

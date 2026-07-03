@@ -20,8 +20,13 @@ logger = logging.getLogger("apps.jobs")
 _TRANSIENT_STEPS = {"precheck", "copy"}
 
 
-@shared_task(bind=True, max_retries=5, acks_late=True)
+# max_retries=None: self.retry còn dùng để CHỜ slot concurrency (semaphore), không chỉ
+# để retry lỗi. Số lần retry vì lỗi thật được kiểm soát riêng qua job.attempts, nên không
+# đặt trần cứng ở đây (semaphore đảm bảo luôn tiến triển: slot sẽ giải phóng khi job xong).
+@shared_task(bind=True, max_retries=None, acks_late=True)
 def deploy_to_machine(self, job_id: int):
+    from apps.deployments.semaphore import acquire_slot, release_slot
+
     try:
         job = Job.objects.select_related(
             "machine", "deployment__credential", "deployment__package_version"
@@ -38,6 +43,20 @@ def deploy_to_machine(self, job_id: int):
     credential = deployment.credential
     pv = deployment.package_version
 
+    # --- Giới hạn concurrency per-deployment: xin 1 slot, đầy thì chờ ---
+    ttl = _job_timeout() + 300
+    if not acquire_slot(deployment.id, deployment.max_concurrency, ttl):
+        logger.debug("Job %s chờ slot (max_concurrency=%s)", job_id, deployment.max_concurrency)
+        raise self.retry(countdown=5)
+
+    try:
+        return _run_job(self, job, deployment, machine, credential, pv)
+    finally:
+        release_slot(deployment.id)
+
+
+def _run_job(self, job, deployment, machine, credential, pv):
+    job_id = job.pk
     job.status = JobStatus.RUNNING
     job.attempts += 1
     job.started_at = job.started_at or timezone.now()
@@ -110,11 +129,13 @@ def deploy_to_machine(self, job_id: int):
         return {"job_id": job_id, "status": job.status, "exit_code": result.exit_code}
 
     # --- Thất bại: quyết định retry ---
+    # Đếm số lần thử THẬT qua job.attempts (không dùng self.request.retries vì retries
+    # còn tính cả những lần chờ slot concurrency, không phải lỗi thật).
     transient = result.step_reached in _TRANSIENT_STEPS
-    if transient and self.request.retries < deployment.retry_limit:
+    if transient and job.attempts <= deployment.retry_limit:
         job.status = JobStatus.QUEUED
         job.save()
-        countdown = 30 * (2 ** self.request.retries)  # backoff 30s, 60s, 120s...
+        countdown = 30 * (2 ** (job.attempts - 1))  # backoff 30s, 60s, 120s...
         logger.info("Retry job %s sau %ss (transient: %s)", job_id, countdown, result.error)
         raise self.retry(countdown=countdown, exc=ExecutorError(result.error))
 
@@ -140,10 +161,17 @@ def finalize_deployment(_results, deployment_id: int):
     except Deployment.DoesNotExist:
         return
 
+    total = deployment.total_count
     failed = deployment.failed_count
     success = deployment.success_count
 
-    if failed == 0:
+    if total == 0:
+        deployment.status = DeploymentStatus.COMPLETED
+    elif success == 0 and failed == 0:
+        # Không thành công cũng không thất bại → mọi job đã bị hủy (reconcile sau khi
+        # cancel terminate). Đánh CANCELLED thay vì COMPLETED cho đúng bản chất.
+        deployment.status = DeploymentStatus.CANCELLED
+    elif failed == 0:
         deployment.status = DeploymentStatus.COMPLETED
     elif success == 0:
         deployment.status = DeploymentStatus.FAILED
@@ -152,6 +180,11 @@ def finalize_deployment(_results, deployment_id: int):
 
     deployment.finished_at = timezone.now()
     deployment.save(update_fields=["status", "finished_at"])
+
+    # Giải phóng bộ đếm concurrency của deployment này.
+    from apps.deployments.semaphore import clear_slots
+
+    clear_slots(deployment_id)
     logger.info(
         "Deployment %s xong: %s thành công / %s thất bại", deployment_id, success, failed
     )
