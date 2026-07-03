@@ -9,6 +9,7 @@ class InstallerType(models.TextChoices):
     EXE = "exe", "Executable (.exe)"
     MSU = "msu", "Windows Update (.msu)"
     MSP = "msp", "Patch (.msp)"
+    MSIX = "msix", "MSIX/AppX (.msix/.appx)"
 
 
 def installer_upload_path(instance, filename):
@@ -59,6 +60,15 @@ class PackageVersion(TimeStampedModel):
         help_text="Lệnh cài đặt silent. Dùng {file} làm placeholder cho đường dẫn installer trên máy đích.",
     )
     uninstall_command = models.TextField(blank=True)
+
+    # Hậu kiểm cài đặt: sau khi installer báo thành công, kiểm registry Uninstall xem có
+    # DisplayName chứa chuỗi này không (chống "false success" — installer trả 0 nhưng
+    # không cài gì). Để TRỐNG = bỏ qua hậu kiểm. So khớp chuỗi con, không phân biệt hoa/thường.
+    verify_name = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Tên phần mềm để hậu kiểm sau cài (vd 'Firefox'). Trống = không kiểm.",
+    )
 
     # Toàn vẹn file
     sha256 = models.CharField(max_length=64, blank=True, db_index=True)

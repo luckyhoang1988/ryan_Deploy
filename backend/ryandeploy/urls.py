@@ -1,4 +1,4 @@
-"""Root URL configuration cho PyDeploy."""
+"""Root URL configuration cho RyanDeploy."""
 from django.contrib import admin
 from django.urls import include, path
 

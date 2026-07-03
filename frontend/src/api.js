@@ -54,6 +54,7 @@ export const api = {
   patch: (p, b) => request("PATCH", p, b),
   del: (p) => request("DELETE", p),
   postForm: (p, formData) => request("POST", p, formData, true),
+  patchForm: (p, formData) => request("PATCH", p, formData, true),
 
   // Auth
   csrf: () => request("GET", "/auth/csrf/"),
@@ -67,6 +68,23 @@ export const api = {
 export function listOf(data) {
   if (Array.isArray(data)) return data;
   return data?.results ?? [];
+}
+
+// Lấy TOÀN BỘ bản ghi qua mọi trang phân trang (dùng cho picker cần đủ danh sách,
+// vd chọn máy đích — API mặc định chỉ trả 25/trang).
+export async function fetchAll(path) {
+  let out = [];
+  let next = path;
+  for (let i = 0; i < 500 && next; i++) {
+    const data = await api.get(next);
+    if (Array.isArray(data)) return data; // endpoint không phân trang
+    out = out.concat(data.results ?? []);
+    if (!data.next) break;
+    // data.next là URL tuyệt đối; lấy path+query sau tiền tố /api để gọi tiếp.
+    const u = new URL(data.next);
+    next = u.pathname.replace(/^\/api/, "") + u.search;
+  }
+  return out;
 }
 
 // Poll một Celery task (tác vụ nền) tới khi xong; trả về payload cuối (có .result / .error).

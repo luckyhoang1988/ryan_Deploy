@@ -17,7 +17,7 @@ export default function Layout({ children }) {
       <aside className="sidebar">
         <div className="brand">
           <Icon name="server" size={22} />
-          <span>PyDeploy</span>
+          <span>RyanDeploy</span>
         </div>
         <nav className="nav">
           {NAV.map((n) => (
@@ -25,6 +25,11 @@ export default function Layout({ children }) {
               <Icon name={n.icon} /> <span>{n.label}</span>
             </NavLink>
           ))}
+          {hasRole("admin") && (
+            <NavLink to="/credentials">
+              <Icon name="key" /> <span>Credential</span>
+            </NavLink>
+          )}
           {hasRole("admin") && (
             <NavLink to="/users">
               <Icon name="users" /> <span>Người dùng</span>

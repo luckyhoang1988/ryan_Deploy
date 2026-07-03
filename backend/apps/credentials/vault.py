@@ -1,7 +1,7 @@
 """
 Credential Vault — mã hóa/giải mã secret at-rest bằng Fernet (AES-128-CBC + HMAC).
 
-Khóa lấy từ settings.PYDEPLOY['VAULT_KEY']. Ở production BẮT BUỘC đặt key thật
+Khóa lấy từ settings.RYANDEPLOY['VAULT_KEY']. Ở production BẮT BUỘC đặt key thật
 (prod.py sẽ raise nếu thiếu). Ở dev, nếu thiếu key sẽ derive tạm từ SECRET_KEY
 để chạy được — KHÔNG dùng cách này ở production.
 """
@@ -28,12 +28,12 @@ def _get_fernet() -> Fernet:
     if _fernet is not None:
         return _fernet
 
-    key = settings.PYDEPLOY.get("VAULT_KEY")
+    key = settings.RYANDEPLOY.get("VAULT_KEY")
     if key:
         key_bytes = key.encode() if isinstance(key, str) else key
     else:
         logger.warning(
-            "PYDEPLOY_VAULT_KEY chưa đặt — dùng key derive tạm từ SECRET_KEY (chỉ hợp lệ cho dev)."
+            "RYANDEPLOY_VAULT_KEY chưa đặt — dùng key derive tạm từ SECRET_KEY (chỉ hợp lệ cho dev)."
         )
         key_bytes = _derive_dev_key()
 

@@ -11,6 +11,9 @@ DEFAULT_SILENT_COMMANDS = {
     "msi": 'msiexec /i "{file}" /qn /norestart',
     "msp": 'msiexec /p "{file}" /qn /norestart',
     "msu": 'wusa "{file}" /quiet /norestart',
+    # MSIX/AppX: cài per-machine qua PowerShell. Cần package đã ký + cert tin cậy trên
+    # máy đích (sideload). Nếu chưa tin cert, thêm bước import cert trước (xem docs).
+    "msix": 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-AppxProvisionedPackage -Online -PackagePath \'{file}\' -SkipLicense"',
     # EXE: không có chuẩn chung — mặc định để trống, admin nhập theo installer.
     # Gợi ý phổ biến trong comment cho UI:
     #   InnoSetup:     "{file}" /VERYSILENT /NORESTART
@@ -26,6 +29,10 @@ _INSTALLER_EXTENSIONS = {
     ".msi": "msi",
     ".msp": "msp",
     ".msu": "msu",
+    ".msixbundle": "msix",
+    ".appxbundle": "msix",
+    ".msix": "msix",
+    ".appx": "msix",
     ".exe": "exe",
 }
 

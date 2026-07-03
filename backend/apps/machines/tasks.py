@@ -12,14 +12,15 @@ logger = logging.getLogger("apps.machines")
 
 
 @shared_task(name="apps.machines.tasks.sync_from_ad")
-def sync_from_ad(search_ou: str | None = None, user_id: int | None = None):
+def sync_from_ad(search_ou: str | None = None, user_id: int | None = None, purge: bool = False):
     """
     Đồng bộ máy từ AD (chạy nền để không chặn web worker).
+    - purge: nếu True, xóa máy không còn trong kết quả AD (dọn máy cũ khi đổi OU).
     Ghi audit tại đây — cả khi kích hoạt từ UI (user_id) lẫn beat nightly (user_id=None).
     """
     from apps.audit.models import AuditLog
 
-    data = sync_computers_from_ad(search_ou=search_ou).as_dict()
+    data = sync_computers_from_ad(search_ou=search_ou, purge=purge).as_dict()
 
     user = None
     if user_id:

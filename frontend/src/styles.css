@@ -113,6 +113,7 @@ th { color: var(--muted); font-weight: 600; }
 .btn:hover { opacity: 0.9; }
 .btn.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
 .btn.danger { background: var(--red); color: #fff; }
+.btn.ghost.danger { background: transparent; color: var(--red); border-color: var(--red); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 input, select, textarea {
@@ -142,3 +143,73 @@ label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px
 .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; }
 .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 24px; width: 460px; max-height: 85vh; overflow: auto; }
 .log { background: #0b1220; border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-family: monospace; font-size: 12px; white-space: pre-wrap; max-height: 300px; overflow: auto; }
+
+/* Filter Bar */
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+/* Pagination */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 16px;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.pagination-info {
+  font-size: 13px;
+  color: var(--muted);
+}
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.pagination-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 34px;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.pagination-btn:hover:not(:disabled):not(.active) {
+  background: var(--panel2);
+  border-color: var(--muted);
+}
+.pagination-btn.active {
+  background: var(--accent);
+  color: #04283a;
+  border-color: var(--accent);
+  font-weight: 700;
+}
+.pagination-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.pagination-ellipsis {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  color: var(--muted);
+  font-size: 14px;
+}
+

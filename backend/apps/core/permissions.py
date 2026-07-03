@@ -50,3 +50,10 @@ class IsAdmin(BasePermission):
         if request.method in SAFE_METHODS:
             return bool(request.user and request.user.is_authenticated)
         return has_role(request.user, ROLE_ADMIN)
+
+
+class IsAdminStrict(BasePermission):
+    """Admin cho MỌI method (kể cả đọc). Dùng cho quản lý người dùng — không lộ danh sách."""
+
+    def has_permission(self, request, view):
+        return has_role(request.user, ROLE_ADMIN)

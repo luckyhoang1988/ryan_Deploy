@@ -1,4 +1,4 @@
-# PyDeploy — Bảo mật (Phase 7)
+# RyanDeploy — Bảo mật (Phase 7)
 
 Hệ thống deploy là **mục tiêu Tier-0**: chiếm được server = thực thi mã tùy ý (SYSTEM) trên mọi máy trạm.
 Xử lý như tài sản có giá trị cao nhất.
@@ -14,7 +14,7 @@ Xử lý như tài sản có giá trị cao nhất.
 | Chống tamper repository | Verify SHA-256 installer trước mỗi lần đẩy | [tasks.py](../backend/apps/jobs/tasks.py) · [repository.py](../backend/apps/packages/repository.py) |
 | Chống brute-force login | Throttle 10/phút | [core/views.py](../backend/apps/core/views.py) |
 | Audit trail | Ghi mọi hành động (upload, credential, deploy, job start/finish, AD sync) | [audit/models.py](../backend/apps/audit/models.py) |
-| Security headers (prod) | HSTS, secure cookies, nosniff | [settings/prod.py](../backend/pydeploy/settings/prod.py) |
+| Security headers (prod) | HSTS, secure cookies, nosniff | [settings/prod.py](../backend/ryandeploy/settings/prod.py) |
 | Service dọn dẹp | Xóa service + file tạm trên máy đích sau mỗi job | [push_executor.py](../backend/apps/executor/push_executor.py) |
 
 ## Nguyên tắc vận hành
@@ -28,7 +28,7 @@ Xử lý như tài sản có giá trị cao nhất.
 ## Checklist trước khi lên production
 
 ```
-□ PYDEPLOY_VAULT_KEY là key thật (32-byte urlsafe base64), lưu an toàn
+□ RYANDEPLOY_VAULT_KEY là key thật (32-byte urlsafe base64), lưu an toàn
 □ DJANGO_SECRET_KEY thật, DEBUG=false (settings.prod)
 □ HTTPS bật (reverse proxy), SESSION/CSRF cookie Secure
 □ Service account KHÔNG phải Domain Admin

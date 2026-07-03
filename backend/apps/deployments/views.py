@@ -8,11 +8,15 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
 from apps.audit.models import AuditLog
+from apps.core.permissions import ROLE_ADMIN, has_role
 from apps.jobs.models import JobStatus
 
-from .models import Deployment, DeploymentStatus
+from .models import Deployment, DeploymentAction, DeploymentStatus
 from .orchestrator import cancel_deployment, launch_deployment
 from .serializers import DeploymentSerializer
+
+# Action phá hoại cao (reboot/shutdown cả fleet) — chỉ admin được kích hoạt.
+_ADMIN_ONLY_ACTIONS = (DeploymentAction.REBOOT, DeploymentAction.SHUTDOWN)
 
 logger = logging.getLogger("apps.deployments")
 
@@ -64,6 +68,12 @@ class DeploymentViewSet(viewsets.ModelViewSet):
     def trigger(self, request, pk=None):
         """Kích hoạt deployment: fan-out thành các job và đẩy song song."""
         deployment = self.get_object()
+
+        if deployment.action in _ADMIN_ONLY_ACTIONS and not has_role(request.user, ROLE_ADMIN):
+            return Response(
+                {"detail": "Chỉ admin được kích hoạt reboot/shutdown."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         if deployment.status == DeploymentStatus.RUNNING:
             return Response(
@@ -117,6 +127,20 @@ class DeploymentViewSet(viewsets.ModelViewSet):
         return Response(
             {"detail": "Đã kích hoạt.", "jobs": job_count, "status": deployment.status},
             status=status.HTTP_202_ACCEPTED,
+        )
+
+    @action(detail=True, methods=["get"])
+    def preview_targets(self, request, pk=None):
+        """Xem trước danh sách máy sẽ chạy sau khi áp targeting_rule (Phase 3)."""
+        from .targeting import resolve_targets
+
+        deployment = self.get_object()
+        machines = resolve_targets(deployment)
+        return Response(
+            {
+                "count": len(machines),
+                "machines": [{"id": m.id, "hostname": m.hostname} for m in machines],
+            }
         )
 
     @action(detail=True, methods=["post"])

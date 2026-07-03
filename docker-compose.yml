@@ -2,15 +2,15 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-pydeploy}
-      POSTGRES_USER: ${POSTGRES_USER:-pydeploy}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pydeploy}
+      POSTGRES_DB: ${POSTGRES_DB:-ryandeploy}
+      POSTGRES_USER: ${POSTGRES_USER:-ryandeploy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ryandeploy}
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pydeploy}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ryandeploy}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -29,9 +29,9 @@ services:
     build: ./backend
     command: >
       sh -c "python manage.py migrate &&
-             gunicorn pydeploy.wsgi:application --bind 0.0.0.0:8000 --workers 3"
+             gunicorn ryandeploy.wsgi:application --bind 0.0.0.0:8000 --workers 3"
     environment:
-      DJANGO_SETTINGS_MODULE: pydeploy.settings.dev
+      DJANGO_SETTINGS_MODULE: ryandeploy.settings.dev
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
     env_file:
@@ -49,9 +49,9 @@ services:
 
   worker:
     build: ./backend
-    command: celery -A pydeploy worker --loglevel=info --concurrency=${PYDEPLOY_MAX_CONCURRENCY:-15}
+    command: celery -A ryandeploy worker --loglevel=info --concurrency=${RYANDEPLOY_MAX_CONCURRENCY:-15}
     environment:
-      DJANGO_SETTINGS_MODULE: pydeploy.settings.dev
+      DJANGO_SETTINGS_MODULE: ryandeploy.settings.dev
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
     env_file:
@@ -66,9 +66,9 @@ services:
 
   beat:
     build: ./backend
-    command: celery -A pydeploy beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    command: celery -A ryandeploy beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     environment:
-      DJANGO_SETTINGS_MODULE: pydeploy.settings.dev
+      DJANGO_SETTINGS_MODULE: ryandeploy.settings.dev
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
     env_file:

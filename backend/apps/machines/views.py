@@ -1,3 +1,7 @@
+import csv
+import io
+
+from django.http import HttpResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -19,32 +23,65 @@ class MachineViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdmin]
 
     def get_permissions(self):
-        # check_online chỉ đọc trạng thái online → operator cũng được (không cần admin).
-        if self.action == "check_online":
+        # check_online, stats, export chỉ đọc → operator cũng được.
+        if self.action in ("check_online", "stats", "export"):
             return [IsViewerOrAbove()]
         return super().get_permissions()
 
-    def get_queryset(self):
-        qs = super().get_queryset()
-        online = self.request.query_params.get("is_online")
+    def _apply_filters(self, qs):
+        """Áp dụng bộ lọc chung cho list, stats, export."""
+        params = self.request.query_params
+        online = params.get("is_online")
         if online in ("true", "false"):
             qs = qs.filter(is_online=(online == "true"))
-        group_id = self.request.query_params.get("group")
+        group_id = params.get("group")
         if group_id:
             qs = qs.filter(groups__id=group_id)
+        search = params.get("search", "").strip()
+        if search:
+            qs = qs.filter(hostname__icontains=search)
+        ou = params.get("ad_ou", "").strip()
+        if ou:
+            qs = qs.filter(ad_ou__icontains=ou)
         return qs
+
+    def get_queryset(self):
+        return self._apply_filters(super().get_queryset())
+
+    @action(detail=False, methods=["get"])
+    def stats(self, request):
+        """Thống kê tổng, online, offline (áp dụng bộ lọc hiện tại)."""
+        qs = self._apply_filters(Machine.objects.all())
+        total = qs.count()
+        online = qs.filter(is_online=True).count()
+        return Response({
+            "total": total,
+            "online": online,
+            "offline": total - online,
+        })
 
     @action(detail=False, methods=["post"])
     def sync_ad(self, request):
         """
         Đồng bộ máy từ Active Directory (chạy nền — LDAP có thể chậm, không chặn web worker).
-        Body tùy chọn: {"search_ou": "OU=..."}. Trả task_id để client poll /api/tasks/<id>/.
+        Body tùy chọn: {"search_ou": "OU=...", "purge": true}.
+        purge=true sẽ xóa máy không còn trong kết quả AD (dùng khi đổi OU scope).
+        Trả task_id để client poll /api/tasks/<id>/.
         """
         search_ou = request.data.get("search_ou")
-        task = sync_from_ad.delay(search_ou, request.user.id)
+        purge = request.data.get("purge", False)
+        task = sync_from_ad.delay(search_ou, request.user.id, purge)
         return Response(
             {"detail": "Đã bắt đầu đồng bộ AD (chạy nền).", "task_id": task.id},
             status=status.HTTP_202_ACCEPTED,
+        )
+
+    @action(detail=False, methods=["post"])
+    def purge_all(self, request):
+        """Xóa tất cả máy trong DB (reset trước khi sync lại với OU mới)."""
+        count, _ = Machine.objects.all().delete()
+        return Response(
+            {"detail": f"Đã xóa {count} máy.", "deleted": count},
         )
 
     @action(detail=False, methods=["post"])
@@ -55,6 +92,29 @@ class MachineViewSet(viewsets.ModelViewSet):
             {"detail": "Đang kiểm tra online (chạy nền).", "task_id": task.id},
             status=status.HTTP_202_ACCEPTED,
         )
+
+    @action(detail=False, methods=["get"])
+    def export(self, request):
+        """Xuất danh sách máy ra file CSV (Excel-compatible, UTF-8 BOM)."""
+        qs = self._apply_filters(Machine.objects.all())
+        buf = io.StringIO()
+        # UTF-8 BOM để Excel tự nhận encoding
+        buf.write("\ufeff")
+        writer = csv.writer(buf)
+        writer.writerow(["Hostname", "FQDN", "OS", "OU", "Trạng thái", "IP", "Lần cuối online"])
+        for m in qs.iterator():
+            writer.writerow([
+                m.hostname,
+                m.fqdn or "",
+                m.os_name or "",
+                m.ad_ou or "",
+                "Online" if m.is_online else "Offline",
+                m.ip_address or "",
+                m.last_seen.strftime("%Y-%m-%d %H:%M") if m.last_seen else "",
+            ])
+        resp = HttpResponse(buf.getvalue(), content_type="text/csv; charset=utf-8")
+        resp["Content-Disposition"] = 'attachment; filename="machines.csv"'
+        return resp
 
 
 class MachineGroupViewSet(viewsets.ModelViewSet):

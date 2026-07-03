@@ -69,21 +69,28 @@ def _run_job(self, job, deployment, machine, credential, pv):
         AuditLog.Action.JOB_START, target=job, machine_hostname=machine.hostname, attempt=job.attempts
     )
 
-    # --- Phase 7: xác minh toàn vẹn installer trước khi đẩy (chống tamper) ---
-    from apps.packages.repository import verify_integrity
+    # --- Dựng kế hoạch chạy theo loại action (install/uninstall/reboot/shutdown/inventory) ---
+    from apps.deployments.actions import build_action_plan
 
-    ok, actual = verify_integrity(pv)
-    if not ok:
-        job.status = JobStatus.FAILED
-        job.error_output = (
-            f"Toàn vẹn installer KHÔNG khớp — SHA-256 mong đợi {pv.sha256}, thực tế {actual}. "
-            "Nghi ngờ file bị sửa đổi. Hủy đẩy."
-        )
-        job.current_step = "precheck"
-        job.finished_at = timezone.now()
-        job.save()
-        logger.error("Integrity FAIL cho job %s (%s)", job_id, machine.hostname)
-        return {"job_id": job_id, "status": "failed", "error": "integrity_mismatch"}
+    plan = build_action_plan(deployment, machine)
+
+    # --- Phase 7: xác minh toàn vẹn installer trước khi đẩy (chống tamper) ---
+    # Chỉ áp dụng khi tác vụ thực sự đẩy installer (install, uninstall-có-{file}).
+    if plan.verify_installer:
+        from apps.packages.repository import verify_integrity
+
+        ok, actual = verify_integrity(pv)
+        if not ok:
+            job.status = JobStatus.FAILED
+            job.error_output = (
+                f"Toàn vẹn installer KHÔNG khớp — SHA-256 mong đợi {pv.sha256}, thực tế {actual}. "
+                "Nghi ngờ file bị sửa đổi. Hủy đẩy."
+            )
+            job.current_step = "precheck"
+            job.finished_at = timezone.now()
+            job.save()
+            logger.error("Integrity FAIL cho job %s (%s)", job_id, machine.hostname)
+            return {"job_id": job_id, "status": "failed", "error": "integrity_mismatch"}
 
     def progress(step, message):
         # Cập nhật step hiện tại (nhẹ, chỉ 1 field)
@@ -94,24 +101,28 @@ def _run_job(self, job, deployment, machine, credential, pv):
         # dừng đẩy hợp tác — bổ sung cho revoke(terminate) vốn không chắc dừng sạch.
         return Job.objects.filter(pk=job.pk, status=JobStatus.CANCELLED).exists()
 
-    executor = PushExecutor(
-        host=machine.target_address,
-        username=credential.username,
-        password=credential.get_password(),
-        domain=credential.domain,
-        timeout=_job_timeout(),
-        progress_cb=progress,
-        cancel_check=is_cancelled,
-    )
+    # Factory: dùng cho lần chạy chính và lần hậu kiểm (mỗi lần 1 instance sạch, tránh
+    # gộp log giữa hai lần chạy). Giải mã mật khẩu 1 lần.
+    cred_password = credential.get_password()
 
-    installer_path = pv.installer_file.path
-    installer_filename = pv.installer_file.name.split("/")[-1]
+    def make_executor(progress_cb=progress):
+        return PushExecutor(
+            host=machine.target_address,
+            username=credential.username,
+            password=cred_password,
+            domain=credential.domain,
+            timeout=_job_timeout(),
+            progress_cb=progress_cb,
+            cancel_check=is_cancelled,
+        )
+
+    executor = make_executor()
 
     result = executor.run(
-        local_installer_path=installer_path,
-        installer_filename=installer_filename,
-        install_command=pv.install_command,
-        success_exit_codes=pv.success_exit_codes or [0, 3010],
+        plan.command,
+        local_payload_path=plan.payload_path,
+        payload_filename=plan.payload_filename,
+        success_exit_codes=plan.success_exit_codes,
         job_token=f"job{job.pk}",
     )
 
@@ -130,6 +141,31 @@ def _run_job(self, job, deployment, machine, credential, pv):
     job.finished_at = timezone.now()
 
     if result.success:
+        # Hậu xử lý theo action (vd inventory: parse stdout → lưu InstalledSoftware).
+        # Không để lỗi post-hook làm hỏng kết quả job đã chạy thành công.
+        if plan.post_hook:
+            try:
+                plan.post_hook(machine, result)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("post_hook lỗi cho job %s (%s): %s", job_id, machine.hostname, e)
+
+        # --- Hậu kiểm cài đặt (chống "false success": installer trả 0 nhưng không cài) ---
+        verify_err = _verify_install(make_executor, plan, job)
+        if verify_err:
+            job.status = JobStatus.FAILED
+            job.error_output = verify_err
+            job.current_step = "verify"
+            job.save()
+            AuditLog.record(
+                AuditLog.Action.JOB_FINISH,
+                target=job,
+                machine_hostname=machine.hostname,
+                status=job.status,
+                error=verify_err[:500],
+            )
+            logger.warning("Hậu kiểm FAIL job %s (%s): %s", job_id, machine.hostname, verify_err)
+            return {"job_id": job_id, "status": "failed", "error": "verify_failed"}
+
         job.status = JobStatus.SUCCESS_REBOOT if result.needs_reboot else JobStatus.SUCCESS
         job.save()
         AuditLog.record(
@@ -163,6 +199,52 @@ def _run_job(self, job, deployment, machine, credential, pv):
         error=result.error[:500],
     )
     return {"job_id": job_id, "status": "failed", "error": result.error}
+
+
+def _verify_install(make_executor, plan, job):
+    """
+    Hậu kiểm sau khi install/uninstall báo thành công — kiểm registry Uninstall có/không
+    có phần mềm. Trả None nếu bỏ qua hoặc ĐẠT; trả chuỗi lỗi nếu KHÔNG đạt (false-success).
+
+    Thận trọng: nếu bước hậu kiểm không chạy tới nơi (lỗi SMB/precheck → exit_code None),
+    KHÔNG kết luận — giữ nguyên thành công, chỉ log (tránh biến install thật thành thất bại
+    vì trục trặc kết nối lúc kiểm).
+    """
+    if not plan.verify_name:
+        return None
+    from apps.deployments.actions import VERIFY_SCRIPT_PATH
+
+    name = plan.verify_name.replace('"', "")  # tránh vỡ tham số PowerShell
+    present = "1" if plan.verify_present else "0"
+    command = (
+        f'powershell -NoProfile -ExecutionPolicy Bypass -File "{{file}}" '
+        f'-Name "{name}" -Present {present}'
+    )
+    verifier = make_executor(progress_cb=None)  # giữ step "verify", không ghi đè bằng step nội bộ
+    vres = verifier.run(
+        command,
+        local_payload_path=VERIFY_SCRIPT_PATH,
+        payload_filename="ryandeploy_verify.ps1",
+        success_exit_codes=[0],
+        job_token=f"job{job.pk}v",
+    )
+    if vres.success:
+        return None
+    if vres.exit_code is None:
+        logger.warning(
+            "Hậu kiểm job %s không hoàn tất (%s) — giữ nguyên thành công", job.pk, vres.error
+        )
+        return None
+    detail = vres.stdout.strip() or vres.error
+    if plan.verify_present:
+        return (
+            f"Cài đặt trả thành công nhưng HẬU KIỂM THẤT BẠI: không thấy '{plan.verify_name}' "
+            f"trong registry (nghi installer không thực sự cài — vd bản stub/online). {detail}"
+        )
+    return (
+        f"Gỡ cài đặt trả thành công nhưng HẬU KIỂM THẤT BẠI: '{plan.verify_name}' VẪN còn "
+        f"trong registry. {detail}"
+    )
 
 
 @shared_task
@@ -207,4 +289,4 @@ def finalize_deployment(_results, deployment_id: int):
 def _job_timeout() -> int:
     from django.conf import settings
 
-    return settings.PYDEPLOY.get("JOB_TIMEOUT", 1800)
+    return settings.RYANDEPLOY.get("JOB_TIMEOUT", 1800)

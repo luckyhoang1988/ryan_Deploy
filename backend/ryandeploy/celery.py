@@ -1,11 +1,11 @@
-"""Celery application cho PyDeploy."""
+"""Celery application cho RyanDeploy."""
 import os
 
 from celery import Celery
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "pydeploy.settings.dev")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "ryandeploy.settings.dev")
 
-app = Celery("pydeploy")
+app = Celery("ryandeploy")
 app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
 

@@ -11,7 +11,7 @@ class DeployCredential(TimeStampedModel):
     Password được mã hóa at-rest bằng Fernet — DB chỉ chứa ciphertext.
     """
 
-    name = models.CharField(max_length=255, unique=True, help_text="Tên gợi nhớ, VD 'svc_pydeploy'")
+    name = models.CharField(max_length=255, unique=True, help_text="Tên gợi nhớ, VD 'svc_ryandeploy'")
     domain = models.CharField(max_length=255, blank=True, help_text="Tên domain NetBIOS, VD 'CORP'")
     username = models.CharField(max_length=255)
 

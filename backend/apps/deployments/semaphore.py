@@ -29,7 +29,7 @@ def _redis():
 
 
 def _key(deployment_id: int) -> str:
-    return f"pydeploy:sema:deploy:{deployment_id}"
+    return f"ryandeploy:sema:deploy:{deployment_id}"
 
 
 def acquire_slot(deployment_id: int, limit: int, ttl: int) -> bool:

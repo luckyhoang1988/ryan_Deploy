@@ -183,3 +183,84 @@ def test_admin_can_create_machine_group(admin_client):
         content_type="application/json",
     )
     assert r.status_code == 201
+
+
+# --- Sửa/Xóa package + version (CRUD admin) ---
+
+
+def _create_version(admin_client, pkg_name="7-Zip", version="1.0"):
+    """Tạo package + upload 1 version qua API, trả (package_id, version_id)."""
+    from django.core.files.uploadedfile import SimpleUploadedFile
+
+    pr = admin_client.post("/api/packages/", {"name": pkg_name}, content_type="application/json")
+    pid = pr.json()["id"]
+    installer = SimpleUploadedFile("setup.msi", b"MZ fake installer bytes", content_type="application/octet-stream")
+    vr = admin_client.post(
+        "/api/package-versions/",
+        {"package": pid, "version": version, "installer_file": installer},
+    )
+    assert vr.status_code == 201, vr.content
+    return pid, vr.json()["id"]
+
+
+def test_admin_update_package_audited(admin_client):
+    from apps.audit.models import AuditLog
+
+    pr = admin_client.post("/api/packages/", {"name": "Firefox"}, content_type="application/json")
+    pid = pr.json()["id"]
+    r = admin_client.patch(
+        f"/api/packages/{pid}/", {"vendor": "Mozilla", "total_licenses": 50}, content_type="application/json"
+    )
+    assert r.status_code == 200
+    assert r.json()["vendor"] == "Mozilla"
+    assert AuditLog.objects.filter(action=AuditLog.Action.PACKAGE_UPDATE, target_id=str(pid)).exists()
+
+
+def test_admin_delete_version_removes_file_and_audits(admin_client):
+    import os
+
+    from apps.audit.models import AuditLog
+    from apps.packages.models import PackageVersion
+
+    _pid, vid = _create_version(admin_client)
+    path = PackageVersion.objects.get(id=vid).installer_file.path
+    assert os.path.exists(path)
+
+    r = admin_client.delete(f"/api/package-versions/{vid}/")
+    assert r.status_code == 204
+    assert not PackageVersion.objects.filter(id=vid).exists()
+    assert not os.path.exists(path)  # file installer đã bị dọn khỏi repository
+    assert AuditLog.objects.filter(action=AuditLog.Action.PACKAGE_VERSION_DELETE, target_id=str(vid)).exists()
+
+
+def test_admin_delete_package_cascades_and_audits(admin_client):
+    import os
+
+    from apps.audit.models import AuditLog
+    from apps.packages.models import Package, PackageVersion
+
+    pid, vid = _create_version(admin_client, pkg_name="Chrome")
+    path = PackageVersion.objects.get(id=vid).installer_file.path
+
+    r = admin_client.delete(f"/api/packages/{pid}/")
+    assert r.status_code == 204
+    assert not Package.objects.filter(id=pid).exists()
+    assert not PackageVersion.objects.filter(id=vid).exists()
+    assert not os.path.exists(path)
+    assert AuditLog.objects.filter(action=AuditLog.Action.PACKAGE_DELETE, target_id=str(pid)).exists()
+
+
+def test_delete_version_referenced_by_deployment_blocked(admin_client):
+    from apps.credentials.models import DeployCredential
+    from apps.deployments.models import Deployment
+    from apps.packages.models import PackageVersion
+
+    _pid, vid = _create_version(admin_client, pkg_name="Notepad++")
+    version = PackageVersion.objects.get(id=vid)
+    cred = DeployCredential.objects.create(name="c", username="u")
+    Deployment.objects.create(name="dep", package_version=version, credential=cred)
+
+    # FK PROTECT → phải bị chặn với lỗi thân thiện (400), không phải 500.
+    r = admin_client.delete(f"/api/package-versions/{vid}/")
+    assert r.status_code == 400
+    assert PackageVersion.objects.filter(id=vid).exists()

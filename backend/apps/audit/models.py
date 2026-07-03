@@ -7,6 +7,9 @@ class AuditLog(models.Model):
 
     class Action(models.TextChoices):
         PACKAGE_UPLOAD = "package_upload", "Upload package"
+        PACKAGE_UPDATE = "package_update", "Sửa package"
+        PACKAGE_DELETE = "package_delete", "Xóa package"
+        PACKAGE_VERSION_DELETE = "package_version_delete", "Xóa version"
         CREDENTIAL_CREATE = "credential_create", "Tạo credential"
         CREDENTIAL_UPDATE = "credential_update", "Sửa credential"
         CREDENTIAL_DELETE = "credential_delete", "Xóa credential"

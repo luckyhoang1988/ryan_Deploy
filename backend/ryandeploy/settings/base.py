@@ -1,5 +1,5 @@
 """
-Base settings for PyDeploy — shared across all environments.
+Base settings for RyanDeploy — shared across all environments.
 Môi trường cụ thể (dev/prod) import từ file này.
 """
 import os
@@ -7,7 +7,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# backend/pydeploy/settings/base.py -> BASE_DIR = backend/
+# backend/ryandeploy/settings/base.py -> BASE_DIR = backend/
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 # Nạp .env ở gốc repo (một cấp trên backend/) nếu có
@@ -48,7 +48,7 @@ INSTALLED_APPS = [
     "corsheaders",
     "django_celery_results",
     "django_celery_beat",
-    # PyDeploy apps
+    # RyanDeploy apps
     "apps.core",
     "apps.credentials",
     "apps.packages",
@@ -69,7 +69,7 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-ROOT_URLCONF = "pydeploy.urls"
+ROOT_URLCONF = "ryandeploy.urls"
 
 TEMPLATES = [
     {
@@ -87,14 +87,14 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = "pydeploy.wsgi.application"
+WSGI_APPLICATION = "ryandeploy.wsgi.application"
 
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": env("POSTGRES_DB", "pydeploy"),
-        "USER": env("POSTGRES_USER", "pydeploy"),
-        "PASSWORD": env("POSTGRES_PASSWORD", "pydeploy"),
+        "NAME": env("POSTGRES_DB", "ryandeploy"),
+        "USER": env("POSTGRES_USER", "ryandeploy"),
+        "PASSWORD": env("POSTGRES_PASSWORD", "ryandeploy"),
         "HOST": env("POSTGRES_HOST", "localhost"),
         "PORT": env("POSTGRES_PORT", "5432"),
     }
@@ -144,7 +144,7 @@ CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "default"
 CELERY_TASK_TRACK_STARTED = True
-CELERY_TASK_TIME_LIMIT = env_int("PYDEPLOY_JOB_TIMEOUT", 1800) + 300
+CELERY_TASK_TIME_LIMIT = env_int("RYANDEPLOY_JOB_TIMEOUT", 1800) + 300
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 
 # --- Cache (Redis) ---
@@ -159,17 +159,17 @@ CACHES = {
 CORS_ALLOW_ALL_ORIGINS = DEBUG
 
 # ============================================================
-# PyDeploy — deployment engine config
+# RyanDeploy — deployment engine config
 # ============================================================
-PYDEPLOY = {
-    "VAULT_KEY": env("PYDEPLOY_VAULT_KEY"),
-    "TARGET_DIR": env("PYDEPLOY_TARGET_DIR", r"PyDeploy\Runner"),
-    "SERVICE_PREFIX": env("PYDEPLOY_SERVICE_PREFIX", "PyDeployRunner"),
-    "MAX_CONCURRENCY": env_int("PYDEPLOY_MAX_CONCURRENCY", 15),
-    "JOB_TIMEOUT": env_int("PYDEPLOY_JOB_TIMEOUT", 1800),
+RYANDEPLOY = {
+    "VAULT_KEY": env("RYANDEPLOY_VAULT_KEY"),
+    "TARGET_DIR": env("RYANDEPLOY_TARGET_DIR", r"RyanDeploy\Runner"),
+    "SERVICE_PREFIX": env("RYANDEPLOY_SERVICE_PREFIX", "RyanDeployRunner"),
+    "MAX_CONCURRENCY": env_int("RYANDEPLOY_MAX_CONCURRENCY", 15),
+    "JOB_TIMEOUT": env_int("RYANDEPLOY_JOB_TIMEOUT", 1800),
     # Trần kích thước file installer được upload (MB) — chặn làm đầy đĩa. Django stream
     # file lớn ra temp disk (không nạp hết RAM) nên đây là giới hạn dung lượng, không phải RAM.
-    "MAX_INSTALLER_MB": env_int("PYDEPLOY_MAX_INSTALLER_MB", 2048),
+    "MAX_INSTALLER_MB": env_int("RYANDEPLOY_MAX_INSTALLER_MB", 2048),
 }
 
 # Chặn body form phi-file quá lớn (không áp cho file upload — file đã có trần riêng ở
@@ -220,7 +220,7 @@ LOGGING = {
             "style": "{",
         },
         "json": {
-            "()": "pydeploy.logformat.JsonFormatter",
+            "()": "ryandeploy.logformat.JsonFormatter",
         },
     },
     "handlers": {

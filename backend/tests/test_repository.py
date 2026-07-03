@@ -1,9 +1,11 @@
 import io
 
 import pytest
+from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.serializers import ValidationError
 
 from apps.packages import repository
+from apps.packages.models import Package
 from apps.packages.serializers import PackageVersionSerializer
 
 
@@ -13,14 +15,14 @@ class _FakeUpload:
 
 
 def test_installer_size_over_limit_rejected(settings):
-    settings.PYDEPLOY = {**settings.PYDEPLOY, "MAX_INSTALLER_MB": 1}
+    settings.RYANDEPLOY = {**settings.RYANDEPLOY, "MAX_INSTALLER_MB": 1}
     s = PackageVersionSerializer()
     with pytest.raises(ValidationError):
         s.validate_installer_file(_FakeUpload(2 * 1024 * 1024))  # 2MB > 1MB
 
 
 def test_installer_size_within_limit_ok(settings):
-    settings.PYDEPLOY = {**settings.PYDEPLOY, "MAX_INSTALLER_MB": 10}
+    settings.RYANDEPLOY = {**settings.RYANDEPLOY, "MAX_INSTALLER_MB": 10}
     s = PackageVersionSerializer()
     upload = _FakeUpload(1 * 1024 * 1024)  # 1MB < 10MB
     assert s.validate_installer_file(upload) is upload
@@ -32,13 +34,31 @@ def test_detect_installer_type():
     assert repository.detect_installer_type("app.exe") == "exe"
     assert repository.detect_installer_type("KB123.msu") == "msu"
     assert repository.detect_installer_type("patch.MSP") == "msp"
+    assert repository.detect_installer_type("App.msix") == "msix"
+    assert repository.detect_installer_type("App.MSIXBUNDLE") == "msix"
+    assert repository.detect_installer_type("App.appx") == "msix"
     assert repository.detect_installer_type("noext") == "exe"  # mặc định
+
+
+def test_upload_without_installer_type_autodetects(db, settings, tmp_path):
+    # Form upload không gửi installer_type → serializer phải qua is_valid() (required=False)
+    # và create() tự suy ra loại từ đuôi file. Regression cho lỗi "installer_type required".
+    settings.MEDIA_ROOT = str(tmp_path)
+    pkg = Package.objects.create(name="Firefox")
+    upload = SimpleUploadedFile("Firefox Installer.exe", b"MZ-fake-binary")
+    s = PackageVersionSerializer(data={"package": pkg.id, "version": "1", "installer_file": upload})
+    assert s.is_valid(), s.errors
+    pv = s.save()
+    assert pv.installer_type == "exe"
+    assert "{file}" in pv.install_command
 
 
 def test_default_install_command():
     assert "msiexec" in repository.default_install_command("msi")
     assert "wusa" in repository.default_install_command("msu")
     assert "{file}" in repository.default_install_command("exe")
+    msix = repository.default_install_command("msix")
+    assert "Add-AppxProvisionedPackage" in msix and "{file}" in msix
 
 
 def test_compute_sha256_known_value():

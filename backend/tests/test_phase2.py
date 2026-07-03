@@ -139,7 +139,7 @@ def test_cancel_revokes_with_terminate(package_version, credential, monkeypatch)
     job.save(update_fields=["celery_task_id"])
 
     calls = []
-    from pydeploy.celery import app
+    from ryandeploy.celery import app
 
     monkeypatch.setattr(app.control, "revoke", lambda tid, **kw: calls.append((tid, kw)))
     monkeypatch.setattr(orchestrator, "clear_slots", lambda _id: None)

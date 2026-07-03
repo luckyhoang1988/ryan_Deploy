@@ -17,7 +17,7 @@ class Migration(migrations.Migration):
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
                 ('created_at', models.DateTimeField(auto_now_add=True)),
                 ('updated_at', models.DateTimeField(auto_now=True)),
-                ('name', models.CharField(help_text="Tên gợi nhớ, VD 'svc_pydeploy'", max_length=255, unique=True)),
+                ('name', models.CharField(help_text="Tên gợi nhớ, VD 'svc_ryandeploy'", max_length=255, unique=True)),
                 ('domain', models.CharField(blank=True, help_text="Tên domain NetBIOS, VD 'CORP'", max_length=255)),
                 ('username', models.CharField(max_length=255)),
                 ('password_encrypted', models.TextField(default='', editable=False)),

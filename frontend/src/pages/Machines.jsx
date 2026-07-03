@@ -1,33 +1,101 @@
-import { useEffect, useState } from "react";
-import { api, listOf, waitForTask } from "../api";
+import { useEffect, useState, useCallback } from "react";
+import { api, waitForTask } from "../api";
 import { useAuth } from "../auth";
-import { StatusBadge } from "../components/Layout";
+
+const PAGE_SIZE = 25;
 
 export default function Machines() {
   const { hasRole } = useAuth();
   const [machines, setMachines] = useState([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [page, setPage] = useState(1);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState("");
   const [showConfig, setShowConfig] = useState(false);
+  const [showSyncModal, setShowSyncModal] = useState(false);
 
-  const load = () =>
-    api.get("/machines/").then((d) => setMachines(listOf(d))).catch((e) => setErr(e.message));
+  // Filters
+  const [search, setSearch] = useState("");
+  const [filterStatus, setFilterStatus] = useState(""); // "" | "true" | "false"
+  const [filterOU, setFilterOU] = useState("");
 
-  useEffect(() => {
-    load();
+  // Stats
+  const [stats, setStats] = useState({ total: 0, online: 0, offline: 0 });
+
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+
+  const buildQuery = useCallback((p) => {
+    const params = new URLSearchParams();
+    params.set("page", p);
+    if (search.trim()) params.set("search", search.trim());
+    if (filterStatus) params.set("is_online", filterStatus);
+    if (filterOU.trim()) params.set("ad_ou", filterOU.trim());
+    return params.toString();
+  }, [search, filterStatus, filterOU]);
+
+  const load = useCallback((p = page) => {
+    api.get(`/machines/?${buildQuery(p)}`)
+      .then((d) => {
+        if (d && d.results) {
+          setMachines(d.results);
+          setTotalCount(d.count || 0);
+        } else if (Array.isArray(d)) {
+          setMachines(d);
+          setTotalCount(d.length);
+        }
+      })
+      .catch((e) => setErr(e.message));
+  }, [buildQuery, page]);
+
+  const loadStats = useCallback(() => {
+    // Stats không cần filter — luôn lấy tổng thể
+    api.get("/machines/stats/").then(setStats).catch(() => {});
   }, []);
 
-  const syncAd = async () => {
+  useEffect(() => {
+    load(page);
+  }, [page, buildQuery]);
+
+  useEffect(() => {
+    loadStats();
+  }, []);
+
+  // Khi đổi filter → reset về trang 1
+  useEffect(() => {
+    setPage(1);
+  }, [search, filterStatus, filterOU]);
+
+  const goToPage = (p) => {
+    if (p >= 1 && p <= totalPages) setPage(p);
+  };
+
+  const syncAd = async (purge = false) => {
     setBusy("ad"); setErr(""); setMsg("");
     try {
-      const { task_id } = await api.post("/machines/sync_ad/", {});
+      const { task_id } = await api.post("/machines/sync_ad/", { purge });
       const t = await waitForTask(task_id);
       if (t.state === "FAILURE") { setErr(`AD sync: ${t.error}`); return; }
       const r = t.result || {};
       if (r.error) { setErr(`AD sync: ${r.error}`); return; }
-      setMsg(`AD sync: +${r.created} mới, ${r.updated} cập nhật`);
-      load();
+      const parts = [`+${r.created} mới`, `${r.updated} cập nhật`];
+      if (r.deleted) parts.push(`${r.deleted} đã xóa`);
+      setMsg(`AD sync: ${parts.join(", ")}`);
+      setPage(1);
+      load(1);
+      loadStats();
+    } catch (e) { setErr(e.message); } finally { setBusy(""); }
+  };
+
+  const purgeAll = async () => {
+    if (!confirm("Xóa TẤT CẢ máy trong hệ thống? Hành động này không thể hoàn tác.")) return;
+    setBusy("purge"); setErr(""); setMsg("");
+    try {
+      const r = await api.post("/machines/purge_all/", {});
+      setMsg(`Đã xóa ${r.deleted} máy. Bấm Sync AD để đồng bộ lại.`);
+      setPage(1);
+      load(1);
+      loadStats();
     } catch (e) { setErr(e.message); } finally { setBusy(""); }
   };
 
@@ -39,8 +107,35 @@ export default function Machines() {
       if (t.state === "FAILURE") { setErr(`Online check: ${t.error}`); return; }
       const r = t.result || {};
       setMsg(`Online check: ${r.online}/${r.checked} máy online`);
-      load();
+      load(page);
+      loadStats();
     } catch (e) { setErr(e.message); } finally { setBusy(""); }
+  };
+
+  const exportCSV = () => {
+    const params = new URLSearchParams();
+    if (search.trim()) params.set("search", search.trim());
+    if (filterStatus) params.set("is_online", filterStatus);
+    if (filterOU.trim()) params.set("ad_ou", filterOU.trim());
+    const q = params.toString();
+    window.open(`/api/machines/export/${q ? "?" + q : ""}`, "_blank");
+  };
+
+  // Tính dãy số trang hiển thị (tối đa 7 nút, có dấu … khi quá nhiều)
+  const pageNumbers = () => {
+    const pages = [];
+    if (totalPages <= 7) {
+      for (let i = 1; i <= totalPages; i++) pages.push(i);
+    } else {
+      pages.push(1);
+      if (page > 3) pages.push("…l");
+      const start = Math.max(2, page - 1);
+      const end = Math.min(totalPages - 1, page + 1);
+      for (let i = start; i <= end; i++) pages.push(i);
+      if (page < totalPages - 2) pages.push("…r");
+      pages.push(totalPages);
+    }
+    return pages;
   };
 
   return (
@@ -54,8 +149,13 @@ export default function Machines() {
             </button>
           )}
           {hasRole("admin") && (
-            <button className="btn ghost" onClick={syncAd} disabled={busy}>
+            <button className="btn ghost" onClick={() => setShowSyncModal(true)} disabled={busy}>
               {busy === "ad" ? "Đang sync…" : "Sync AD"}
+            </button>
+          )}
+          {hasRole("admin") && (
+            <button className="btn ghost danger" onClick={purgeAll} disabled={busy}>
+              {busy === "purge" ? "Đang xóa…" : "Xóa tất cả máy"}
             </button>
           )}
           <button className="btn ghost" onClick={checkOnline} disabled={busy}>
@@ -63,6 +163,61 @@ export default function Machines() {
           </button>
         </div>
       </div>
+
+      {/* Stats Cards */}
+      <div className="cards" style={{ marginBottom: 16 }}>
+        <div className="card stat" onClick={() => setFilterStatus("")} style={{ cursor: "pointer" }}>
+          <div className="card-icon cyan">
+            <svg className="icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          </div>
+          <div><div className="value">{stats.total}</div><div className="label">Tổng máy</div></div>
+        </div>
+        <div className="card stat" onClick={() => setFilterStatus("true")} style={{ cursor: "pointer" }}>
+          <div className="card-icon green">
+            <svg className="icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M8 12l3 3 5-5"/></svg>
+          </div>
+          <div><div className="value">{stats.online}</div><div className="label">Online</div></div>
+        </div>
+        <div className="card stat" onClick={() => setFilterStatus("false")} style={{ cursor: "pointer" }}>
+          <div className="card-icon red">
+            <svg className="icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/></svg>
+          </div>
+          <div><div className="value">{stats.offline}</div><div className="label">Offline</div></div>
+        </div>
+      </div>
+
+      {/* Filter Bar */}
+      <div className="filter-bar">
+        <input
+          type="text"
+          placeholder="🔍 Tìm hostname…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ maxWidth: 220 }}
+        />
+        <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} style={{ maxWidth: 160 }}>
+          <option value="">Tất cả trạng thái</option>
+          <option value="true">Online</option>
+          <option value="false">Offline</option>
+        </select>
+        <input
+          type="text"
+          placeholder="Lọc theo OU…"
+          value={filterOU}
+          onChange={(e) => setFilterOU(e.target.value)}
+          style={{ maxWidth: 220 }}
+        />
+        {(search || filterStatus || filterOU) && (
+          <button className="btn ghost" style={{ padding: "6px 12px" }} onClick={() => { setSearch(""); setFilterStatus(""); setFilterOU(""); }}>
+            ✕ Xóa lọc
+          </button>
+        )}
+        <div style={{ flex: 1 }} />
+        <button className="btn ghost" onClick={exportCSV} title="Xuất danh sách ra Excel (CSV)">
+          📥 Xuất Excel
+        </button>
+      </div>
+
       {msg && <p className="muted">{msg}</p>}
       {err && <p className="error">{err}</p>}
       <table>
@@ -76,16 +231,68 @@ export default function Machines() {
               <td className="muted">{m.fqdn || "—"}</td>
               <td>{m.os_name || "—"}</td>
               <td className="muted">{m.ad_ou || "—"}</td>
-              <td><StatusBadge status={m.is_online ? "success" : "failed"} /></td>
+              <td>
+                <span className={`badge ${m.is_online ? "success" : "default"}`}>
+                  {m.is_online ? "Online" : "Offline"}
+                </span>
+              </td>
             </tr>
           ))}
-          {machines.length === 0 && <tr><td colSpan="5" className="muted">Chưa có máy. Bấm “Sync AD”.</td></tr>}
+          {machines.length === 0 && <tr><td colSpan="5" className="muted">Không tìm thấy máy nào.</td></tr>}
         </tbody>
       </table>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="pagination">
+          <span className="pagination-info">
+            Hiển thị {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, totalCount)} / {totalCount} máy
+          </span>
+          <div className="pagination-controls">
+            <button
+              className="pagination-btn"
+              onClick={() => goToPage(page - 1)}
+              disabled={page <= 1}
+              title="Trang trước"
+            >
+              ‹
+            </button>
+            {pageNumbers().map((p) =>
+              typeof p === "string" ? (
+                <span key={p} className="pagination-ellipsis">…</span>
+              ) : (
+                <button
+                  key={p}
+                  className={`pagination-btn${p === page ? " active" : ""}`}
+                  onClick={() => goToPage(p)}
+                >
+                  {p}
+                </button>
+              )
+            )}
+            <button
+              className="pagination-btn"
+              onClick={() => goToPage(page + 1)}
+              disabled={page >= totalPages}
+              title="Trang sau"
+            >
+              ›
+            </button>
+          </div>
+        </div>
+      )}
+
       {showConfig && (
         <ADConfigModal
           onClose={() => setShowConfig(false)}
           onSaved={() => setMsg("Đã lưu cấu hình AD.")}
+        />
+      )}
+      {showSyncModal && (
+        <SyncADModal
+          onClose={() => setShowSyncModal(false)}
+          onSync={(purge) => { setShowSyncModal(false); syncAd(purge); }}
+          busy={busy}
         />
       )}
     </div>
@@ -136,6 +343,7 @@ function ADConfigModal({ onClose, onSaved }) {
       const d = await api.put("/ad-config/", body);
       setHasPassword(!!d.has_password);
       setForm((f) => ({ ...f, bind_password: "" }));
+      setTestMsg("✓ Đã lưu cấu hình AD.");
       onSaved?.();
     } catch (e2) { setErr(e2.message); } finally { setBusy(""); }
   };
@@ -201,6 +409,49 @@ function ADConfigModal({ onClose, onSaved }) {
           </div>
         </div>
       </form>
+    </div>
+  );
+}
+
+function SyncADModal({ onClose, onSync, busy }) {
+  const [purge, setPurge] = useState(false);
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 420 }}>
+        <h3>Đồng bộ máy từ AD</h3>
+        <p className="muted" style={{ fontSize: 14, margin: "8px 0 16px" }}>
+          Đồng bộ danh sách máy tính từ Active Directory theo cấu hình Search OU hiện tại.
+        </p>
+
+        <label className="row" style={{ gap: 8, alignItems: "flex-start", cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={purge}
+            onChange={(e) => setPurge(e.target.checked)}
+            style={{ width: "auto", marginTop: 3 }}
+          />
+          <span>
+            <strong>Xóa máy ngoài phạm vi</strong>
+            <br />
+            <span className="muted" style={{ fontSize: 12 }}>
+              Sau khi sync, xóa tất cả máy trong DB mà không còn nằm trong kết quả AD.
+              Bật tùy chọn này khi bạn đã đổi Search OU và muốn dọn máy cũ.
+            </span>
+          </span>
+        </label>
+
+        <div className="row spread mt">
+          <button type="button" className="btn ghost" onClick={onClose}>Hủy</button>
+          <button
+            className="btn"
+            onClick={() => onSync(purge)}
+            disabled={busy}
+          >
+            {busy === "ad" ? "Đang sync…" : purge ? "Sync & Xóa máy cũ" : "Sync AD"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

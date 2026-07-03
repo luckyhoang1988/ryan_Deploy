@@ -79,8 +79,8 @@ class PushExecutor:
         password: str,
         domain: str = "",
         *,
-        target_dir: str = r"PyDeploy\Runner",
-        service_prefix: str = "PyDeployRunner",
+        target_dir: str = r"RyanDeploy\Runner",
+        service_prefix: str = "RyanDeployRunner",
         timeout: int = 1800,
         smb_port: int = 445,
         progress_cb: Optional[ProgressCb] = None,
@@ -137,13 +137,21 @@ class PushExecutor:
     # -------------------------------------------------------------- main flow
     def run(
         self,
-        local_installer_path: str,
-        installer_filename: str,
-        install_command: str,
+        command: str,
         *,
+        local_payload_path: Optional[str] = None,
+        payload_filename: Optional[str] = None,
         success_exit_codes: Optional[list[int]] = None,
         job_token: Optional[str] = None,
     ) -> ExecResult:
+        """
+        Chạy một tác vụ trên máy đích qua SMB + service tạm.
+
+        - `command`: lệnh cmd chạy trên máy đích. Nếu có payload, token `{file}` trong
+          command được thay bằng đường dẫn payload trên đĩa máy đích.
+        - `local_payload_path`/`payload_filename`: file cần đẩy (installer hoặc script).
+          Bỏ trống → tác vụ không cần file (vd reboot/shutdown).
+        """
         success_exit_codes = success_exit_codes or [0, 3010]
         job_token = job_token or uuid.uuid4().hex[:12]
         result = ExecResult()
@@ -156,10 +164,10 @@ class PushExecutor:
 
             # 2) CONNECT + COPY ---------------------------------------------
             self._abort_if_cancelled()
-            self._emit(STEP_COPY, "Kết nối SMB và copy file...")
+            self._emit(STEP_COPY, "Kết nối SMB và copy payload...")
             result.step_reached = STEP_COPY
             self._connect()
-            self._copy_payload(job_token, local_installer_path, installer_filename, install_command)
+            self._copy_payload(job_token, command, local_payload_path, payload_filename)
 
             # 3) EXECUTE -----------------------------------------------------
             self._abort_if_cancelled()
@@ -241,19 +249,21 @@ class PushExecutor:
                 # đã tồn tại -> bỏ qua
                 pass
 
-    def _copy_payload(self, job_token, local_installer_path, installer_filename, install_command):
+    def _copy_payload(self, job_token, command, local_payload_path=None, payload_filename=None):
         conn = self._conn
         self._ensure_dirs(job_token)
 
-        # Upload installer
-        with open(local_installer_path, "rb") as fh:
-            conn.putFile(self.ADMIN_SHARE, self._share_path(job_token, installer_filename), fh.read)
+        # Upload payload (installer/script) nếu có; token {file} -> đường dẫn trên máy đích.
+        # Tác vụ không cần file (vd reboot/shutdown) thì command chạy nguyên văn.
+        if local_payload_path and payload_filename:
+            with open(local_payload_path, "rb") as fh:
+                conn.putFile(self.ADMIN_SHARE, self._share_path(job_token, payload_filename), fh.read)
+            payload_disk = self._disk_path(job_token, payload_filename)
+            command = command.replace("{file}", f'"{payload_disk}"')
 
-        # Sinh wrapper .bat: chạy install, ghi stdout + exit code ra file
-        installer_disk = self._disk_path(job_token, installer_filename)
+        # Sinh wrapper .bat: chạy command, ghi stdout + exit code ra file
         stdout_disk = self._disk_path(job_token, "stdout.log")
         exit_disk = self._disk_path(job_token, "exit.code")
-        command = install_command.replace("{file}", f'"{installer_disk}"')
 
         bat = (
             "@echo off\r\n"

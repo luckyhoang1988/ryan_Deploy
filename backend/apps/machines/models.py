@@ -34,6 +34,28 @@ class Machine(TimeStampedModel):
         return self.fqdn or self.hostname or self.ip_address
 
 
+class InstalledSoftware(TimeStampedModel):
+    """
+    Một phần mềm đã cài trên 1 máy — thu từ registry Uninstall keys qua action
+    inventory. Dùng cho conditional targeting ("thiếu Chrome thì cài Chrome").
+    Mỗi lần scan sẽ thay toàn bộ bản ghi của máy đó (xoá cũ, ghi mới).
+    """
+
+    machine = models.ForeignKey(Machine, on_delete=models.CASCADE, related_name="installed_software")
+    name = models.CharField(max_length=512, db_index=True)  # DisplayName
+    version = models.CharField(max_length=128, blank=True)  # DisplayVersion
+    publisher = models.CharField(max_length=255, blank=True)
+    source = models.CharField(max_length=32, default="registry")
+    scanned_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ("machine", "name", "version")
+        indexes = [models.Index(fields=["machine", "name"])]
+
+    def __str__(self):
+        return f"{self.name} {self.version} @ {self.machine.hostname}"
+
+
 class ADConfig(TimeStampedModel):
     """
     Cấu hình kết nối Active Directory/LDAP — chỉnh trực tiếp từ Web UI.

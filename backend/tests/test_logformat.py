@@ -1,7 +1,7 @@
 import json
 import logging
 
-from pydeploy.logformat import JsonFormatter
+from ryandeploy.logformat import JsonFormatter
 
 
 def test_json_formatter_basic():

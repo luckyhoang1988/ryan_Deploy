@@ -14,12 +14,32 @@ class DeploymentStatus(models.TextChoices):
     CANCELLED = "cancelled", "Đã hủy"
 
 
+class DeploymentAction(models.TextChoices):
+    INSTALL = "install", "Cài đặt"
+    UNINSTALL = "uninstall", "Gỡ cài đặt"
+    REBOOT = "reboot", "Khởi động lại"
+    SHUTDOWN = "shutdown", "Tắt máy"
+    INVENTORY = "inventory", "Quét phần mềm (inventory)"
+
+
+# Action cần một PackageVersion (installer/command); còn lại chạy payload-less/script.
+PACKAGE_ACTIONS = frozenset({DeploymentAction.INSTALL, DeploymentAction.UNINSTALL})
+
+
 class Deployment(TimeStampedModel):
-    """Một chiến dịch đẩy 1 PackageVersion tới nhiều máy."""
+    """Một chiến dịch chạy 1 tác vụ (cài/gỡ/reboot/shutdown/inventory) trên nhiều máy."""
 
     name = models.CharField(max_length=255)
+    # install/uninstall cần package_version; reboot/shutdown/inventory để trống.
+    action = models.CharField(
+        max_length=16, choices=DeploymentAction.choices, default=DeploymentAction.INSTALL, db_index=True
+    )
     package_version = models.ForeignKey(
-        "packages.PackageVersion", on_delete=models.PROTECT, related_name="deployments"
+        "packages.PackageVersion",
+        on_delete=models.PROTECT,
+        related_name="deployments",
+        null=True,
+        blank=True,
     )
     credential = models.ForeignKey(
         "credentials.DeployCredential", on_delete=models.PROTECT, related_name="deployments"
@@ -33,6 +53,10 @@ class Deployment(TimeStampedModel):
 
     # Lịch chạy — null = chạy ngay khi trigger
     scheduled_at = models.DateTimeField(null=True, blank=True)
+
+    # Điều kiện targeting (Phase 3): vd {"exclude_if_software": "Google Chrome", "min_version": "120"}.
+    # null = chạy trên toàn bộ target_machines.
+    targeting_rule = models.JSONField(null=True, blank=True)
 
     # Điều phối
     max_concurrency = models.PositiveIntegerField(default=15)

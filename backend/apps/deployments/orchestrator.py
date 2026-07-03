@@ -3,7 +3,7 @@ Orchestrator — fan-out một Deployment thành nhiều Job và đẩy song son
 
 Dùng Celery chord: group(deploy_to_machine cho mỗi máy) -> finalize_deployment.
 Mức song song thực tế do worker concurrency quyết định
-(docker-compose: --concurrency=${PYDEPLOY_MAX_CONCURRENCY}).
+(docker-compose: --concurrency=${RYANDEPLOY_MAX_CONCURRENCY}).
 """
 import logging
 
@@ -15,6 +15,7 @@ from apps.jobs.tasks import deploy_to_machine, finalize_deployment
 
 from .models import DeploymentStatus
 from .semaphore import clear_slots
+from .targeting import resolve_targets
 
 logger = logging.getLogger("apps.deployments")
 
@@ -24,7 +25,8 @@ def launch_deployment(deployment) -> int:
     Tạo Job cho mỗi máy đích (idempotent) và enqueue chord.
     Trả về số job được đẩy vào hàng đợi.
     """
-    machines = list(deployment.target_machines.filter(enabled=True))
+    # Áp targeting_rule (nếu có): vd chỉ cài lên máy CHƯA có phần mềm theo inventory.
+    machines = resolve_targets(deployment)
     if not machines:
         return 0
 
@@ -63,7 +65,7 @@ def launch_deployment(deployment) -> int:
 
 def cancel_deployment(deployment) -> int:
     """Đánh dấu các job chưa kết thúc là CANCELLED và revoke task."""
-    from pydeploy.celery import app
+    from ryandeploy.celery import app
 
     pending = deployment.jobs.exclude(
         status__in=[

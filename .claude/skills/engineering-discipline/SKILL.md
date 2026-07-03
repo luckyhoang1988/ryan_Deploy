@@ -24,7 +24,7 @@ description: >-
 - Mọi thay đổi có mặt runtime phải được **chạy thật** để quan sát hành vi — không chỉ dựa vào "trông có vẻ đúng".
 - Ưu tiên: chạy đúng luồng bị ảnh hưởng (end-to-end), rồi mới đến unit test.
 - Không tuyên bố "đã xong/đã fix" nếu chưa thấy nó chạy đúng. Nếu test fail, báo cáo trung thực kèm output.
-- Với dự án này: `manage.py check`, `pytest` (dùng `DJANGO_SETTINGS_MODULE=pydeploy.settings.test` cho sqlite), `npm run build`.
+- Với dự án này: `manage.py check`, `pytest` (dùng `DJANGO_SETTINGS_MODULE=ryandeploy.settings.test` cho sqlite), `npm run build`.
 
 ## 3. Đọc kỹ tài liệu chuyên môn để cập nhật skill
 - Trước khi dùng thư viện/công nghệ mới, đọc tài liệu chính thức — không dựa vào trí nhớ.

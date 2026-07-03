@@ -2,18 +2,20 @@ from django.conf import settings
 from rest_framework import serializers
 
 from . import repository
-from .models import Package, PackageVersion
+from .models import InstallerType, Package, PackageVersion
 
 
 class PackageVersionSerializer(serializers.ModelSerializer):
     package_name = serializers.CharField(source="package.name", read_only=True)
+    # Không bắt buộc: nếu để trống, create() tự suy ra từ đuôi file installer.
+    installer_type = serializers.ChoiceField(choices=InstallerType.choices, required=False)
 
     def validate_installer_file(self, upload):
         # Chặn upload installer quá lớn (đầy đĩa repository). None xảy ra khi update không
         # đổi file → bỏ qua.
         if upload is None:
             return upload
-        max_mb = settings.PYDEPLOY.get("MAX_INSTALLER_MB", 2048)
+        max_mb = settings.RYANDEPLOY.get("MAX_INSTALLER_MB", 2048)
         if upload.size > max_mb * 1024 * 1024:
             raise serializers.ValidationError(
                 f"File installer {upload.size / (1024 * 1024):.0f} MB vượt giới hạn {max_mb} MB."
@@ -31,6 +33,7 @@ class PackageVersionSerializer(serializers.ModelSerializer):
             "installer_type",
             "install_command",
             "uninstall_command",
+            "verify_name",
             "sha256",
             "file_size",
             "success_exit_codes",
@@ -65,6 +68,18 @@ class PackageVersionSerializer(serializers.ModelSerializer):
             validated_data["created_by"] = request.user
 
         return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        # Sửa version thường chỉ đổi metadata (lệnh cài, verify_name…). Nếu admin thay
+        # installer_file thì phải tính lại checksum + kích thước, nếu không integrity
+        # check sẽ so với sha256 cũ và luôn báo lỗi.
+        upload = validated_data.get("installer_file")
+        if upload is not None:
+            validated_data["sha256"] = repository.compute_sha256(upload)
+            validated_data["file_size"] = upload.size
+            if not validated_data.get("installer_type"):
+                validated_data["installer_type"] = repository.detect_installer_type(upload.name)
+        return super().update(instance, validated_data)
 
 
 class PackageSerializer(serializers.ModelSerializer):

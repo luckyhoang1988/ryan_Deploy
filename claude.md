@@ -1,6 +1,6 @@
-# Claude Integration Guide - PyDeploy
+# Claude Integration Guide - RyanDeploy
 
-**Hướng dẫn sử dụng Claude API và Claude Code cho dự án PyDeploy**
+**Hướng dẫn sử dụng Claude API và Claude Code cho dự án RyanDeploy**
 
 ---
 
@@ -367,7 +367,7 @@ Viết summary 5-10 dòng, chuyên nghiệp, để send cho manager.
 
 ## 🎯 **Prompt Engineering**
 
-### **Best Prompts for PyDeploy**
+### **Best Prompts for RyanDeploy**
 
 #### **1. Deployment Feasibility**
 
@@ -676,7 +676,7 @@ def analyze_deployment(self, deployment_id: int, timeout=30) -> dict:
 ### **1. Django Settings**
 
 ```python
-# backend/pydeploy/settings.py
+# backend/ryandeploy/settings.py
 
 import os
 
@@ -787,7 +787,7 @@ Prompt: "Giúp tôi debug lỗi này: [error message]"
 
 ---
 
-**Prepared for:** PyDeploy Project
+**Prepared for:** RyanDeploy Project
 **Last Updated:** 2024-03-15
 **Version:** 1.0
 

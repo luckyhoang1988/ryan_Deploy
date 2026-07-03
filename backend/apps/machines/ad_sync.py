@@ -31,6 +31,7 @@ _COMPUTER_ATTRS = [
 class SyncResult:
     created: int = 0
     updated: int = 0
+    deleted: int = 0
     total: int = 0
     error: str = ""
 
@@ -38,6 +39,7 @@ class SyncResult:
         return {
             "created": self.created,
             "updated": self.updated,
+            "deleted": self.deleted,
             "total": self.total,
             "error": self.error,
         }
@@ -81,6 +83,15 @@ def _connect(cfg: dict):
     except ImportError:
         return None, "ldap3 chưa được cài."
 
+    # OpenSSL 3 bỏ MD4 khỏi provider mặc định; NTLM bind cần MD4 để tính NT hash.
+    from ._md4_compat import install as _install_md4
+
+    if not _install_md4():
+        return None, (
+            "Thiếu MD4 cho NTLM bind (OpenSSL 3 không có MD4 và pycryptodomex "
+            "không khả dụng). Cân nhắc dùng LDAPS + simple bind."
+        )
+
     try:
         server = Server(cfg["SERVER"], use_ssl=cfg.get("USE_SSL", False), get_info=ALL)
         conn = Connection(
@@ -116,17 +127,10 @@ def test_ad_connection(cfg: dict | None = None) -> dict:
         "source": cfg.get("SOURCE", ""),
     }
     try:
-        from ldap3 import SUBTREE
-
         base = cfg.get("SEARCH_OU") or cfg.get("BASE_DN")
         if base:
-            conn.search(
-                search_base=base,
-                search_filter="(objectClass=computer)",
-                search_scope=SUBTREE,
-                attributes=["name"],
-            )
-            info["computers_found"] = len(conn.entries)
+            entries = _paged_computer_search(conn, base, ["name"])
+            info["computers_found"] = len(entries)
             info["search_base"] = base
         else:
             info["note"] = "Bind OK nhưng chưa đặt base_dn để đếm máy."
@@ -139,11 +143,17 @@ def test_ad_connection(cfg: dict | None = None) -> dict:
     return info
 
 
-def sync_computers_from_ad(base_dn: str | None = None, search_ou: str | None = None) -> SyncResult:
+def sync_computers_from_ad(
+    base_dn: str | None = None,
+    search_ou: str | None = None,
+    purge: bool = False,
+) -> SyncResult:
     """
     Query AD (objectClass=computer) và upsert vào Machine.
     - search_ou / base_dn: override; mặc định lấy từ cấu hình hiệu lực.
-    Trả SyncResult với số created/updated.
+    - purge: nếu True, xóa máy trong DB mà không còn trong kết quả AD
+      (dùng khi đổi phạm vi OU để dọn máy cũ).
+    Trả SyncResult với số created/updated/deleted.
     """
     cfg = resolve_ad_config()
     result = SyncResult()
@@ -165,29 +175,23 @@ def sync_computers_from_ad(base_dn: str | None = None, search_ou: str | None = N
         return result
 
     try:
-        from ldap3 import SUBTREE
-
-        conn.search(
-            search_base=search_base,
-            search_filter="(objectClass=computer)",
-            search_scope=SUBTREE,
-            attributes=_COMPUTER_ATTRS,
-        )
-        entries = conn.entries
+        entries = _paged_computer_search(conn, search_base, _COMPUTER_ATTRS)
     except Exception as e:  # noqa: BLE001
         result.error = f"Tìm kiếm AD thất bại: {e}"
         return result
     finally:
         conn.unbind()
 
+    synced_hostnames = set()
     for entry in entries:
         hostname = _attr(entry, "name")
         if not hostname:
             continue
+        synced_hostnames.add(hostname)
         fqdn = _attr(entry, "dNSHostName")
         os_name = _attr(entry, "operatingSystem")
         os_version = _attr(entry, "operatingSystemVersion")
-        dn = _attr(entry, "distinguishedName")
+        dn = entry.get("dn", "")
         ou = _extract_ou(dn)
 
         _, created = Machine.objects.update_or_create(
@@ -204,19 +208,43 @@ def sync_computers_from_ad(base_dn: str | None = None, search_ou: str | None = N
         else:
             result.updated += 1
 
+    # Xóa máy không còn trong kết quả AD (khi đổi OU scope).
+    if purge and synced_hostnames:
+        deleted_count, _ = Machine.objects.exclude(hostname__in=synced_hostnames).delete()
+        result.deleted = deleted_count
+        if deleted_count:
+            logger.info("AD sync purge: đã xóa %s máy ngoài phạm vi", deleted_count)
+
     result.total = result.created + result.updated
-    logger.info("AD sync: %s created, %s updated", result.created, result.updated)
+    logger.info("AD sync: %s created, %s updated, %s deleted", result.created, result.updated, result.deleted)
     return result
 
 
+def _paged_computer_search(conn, base: str, attrs: list[str]) -> list[dict]:
+    """
+    Tìm objectClass=computer với phân trang (paged control) để vượt giới hạn
+    MaxPageSize mặc định của AD (1000). Trả list dict entry (bỏ referral).
+    """
+    from ldap3 import SUBTREE
+
+    gen = conn.extend.standard.paged_search(
+        search_base=base,
+        search_filter="(objectClass=computer)",
+        search_scope=SUBTREE,
+        attributes=attrs,
+        paged_size=500,
+        generator=True,
+    )
+    # paged_search trả cả searchResRef (referral) không có 'attributes' — lọc bỏ.
+    return [e for e in gen if isinstance(e, dict) and e.get("type") == "searchResEntry"]
+
+
 def _attr(entry, name: str) -> str:
-    try:
-        val = getattr(entry, name).value
-    except Exception:
-        return ""
+    attrs = entry.get("attributes", {}) if isinstance(entry, dict) else {}
+    val = attrs.get(name, "")
     if isinstance(val, list):
         val = val[0] if val else ""
-    return str(val) if val is not None else ""
+    return str(val) if val not in (None, "") else ""
 
 
 def _extract_ou(dn: str) -> str:

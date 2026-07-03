@@ -14,6 +14,64 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-03 — "False success": installer trả exit 0 nhưng không cài (Firefox stub) + hậu kiểm
+**Bối cảnh:** Deploy Firefox báo "Thành công" (exit 0, 2/2 máy) nhưng máy không có Firefox.
+File upload chỉ 493 KB = **Firefox online stub installer** (trình tải nhỏ), không phải bộ cài.
+**Bài học:**
+1. **Engine chỉ tin exit code → stub trả 0 = false success.** Stub `/S` chạy dưới SYSTEM/
+   session-0 (service tạm, không desktop) thoát ngay với 0, stdout rỗng, không cài gì. Bộ
+   cài đúng: MSI enterprise (msiexec /i /qn) hoặc EXE offline đầy đủ ~60MB (NSIS /S). KHÔNG
+   dùng "Firefox Installer.exe" (~500KB).
+2. **Giải bằng hậu kiểm registry** (opt-in field `PackageVersion.verify_name`): sau khi
+   install/uninstall báo thành công, chạy LẦN 2 `PushExecutor.run()` với `verify_installed.ps1`
+   kiểm `HKLM\...\Uninstall` có DisplayName khớp không → exit 0/1. Install kỳ vọng CÓ, uninstall
+   kỳ vọng MẤT. Sai → job FAILED với thông báo rõ.
+3. **Gotcha quan trọng:** nếu bước verify KHÔNG chạy tới nơi (`vres.exit_code is None` = lỗi
+   SMB/precheck), phải GIỮ nguyên thành công, KHÔNG kết luận — nếu không sẽ biến install thật
+   thành thất bại chỉ vì trục trặc kết nối lúc kiểm. Chỉ khi verify chạy xong (exit_code != None)
+   mà != 0 mới đánh false-success.
+4. **Tái dùng executor cho lần 2:** PushExecutor tích luỹ `self._log` qua các lần run() → phải
+   tạo INSTANCE MỚI cho lần verify (factory `make_executor`), không gọi run() lại trên cùng obj.
+**Áp dụng:** Bất kỳ tác vụ mà "mã trả về" không chứng minh được kết quả (installer, script,
+network op) → thêm hậu kiểm độc lập, và luôn phân biệt "kiểm thất bại" vs "kiểm không chạy được".
+
+## 2026-07-03 — Picker frontend chỉ hiện 25 bản ghi vì DRF PageNumberPagination
+**Bối cảnh:** Wizard tạo deployment chọn máy đích chỉ hiện 25/264 máy. `api.get("/machines/")`
++ `listOf()` chỉ lấy `results` của TRANG ĐẦU.
+**Bài học:** `REST_FRAMEWORK.PAGE_SIZE=25` áp cho MỌI list endpoint, và không có
+`page_size_query_param` nên client không override được bằng `?page_size=`. Component kiểu
+"picker" (chọn tất cả) phải lấy HẾT các trang: helper `fetchAll(path)` lặp theo `data.next`
+(URL tuyệt đối → cắt tiền tố `/api` lấy path+query gọi tiếp). Trang quản lý Machines thì
+đúng vì nó có UI phân trang thật; chỉ các dropdown/checklist "cần đủ" mới dính bug này.
+**Áp dụng:** Bất kỳ list nạp vào picker/checklist/multiselect → dùng `fetchAll`, không
+`api.get`+`listOf`. Với danh sách lớn (264 máy) thêm ô lọc + nút "chọn hết (đang hiện)".
+
+## 2026-07-03 — Đa loại action deployment (uninstall/reboot/shutdown/inventory/MSIX)
+**Bối cảnh:** Mở rộng deployment vốn chỉ install thành 5 loại action, tái dùng chord/
+semaphore/cancel/UI. Tổng quát hoá `PushExecutor.run()` cho payload tuỳ chọn + branch
+theo `Deployment.action` trong `_run_job`.
+**Bài học:**
+1. **run.bat bọc mọi command với `> stdout.log 2>&1` + ghi `exit.code`** → cơ chế collect
+   hoàn toàn command-agnostic. Nhờ đó thêm action mới chỉ là đổi (command, payload):
+   installer→command có `{file}`, reboot→command hằng không payload, inventory→đẩy .ps1
+   rồi đọc stdout. Không cần đụng `_collect_result`. Đây là seam đúng để mở rộng.
+2. **Reboot/shutdown phải có delay** (`shutdown /r /t 30`): lệnh trả về NGAY (đặt lịch tắt),
+   `exit.code`=0 kịp ghi & thu về TRƯỚC khi máy tắt ~30s. Nếu `/t 0` thì SMB rớt giữa
+   collect → job treo/lỗi oan. Dùng `success_exit_codes=[0]` (không phải [0,3010]).
+3. **PowerShell `ConvertTo-Json` đổi hình dạng theo số phần tử:** 1 item → object (không
+   phải array), 0 item → chuỗi rỗng. Parser phải `if isinstance(data, dict): data=[data]`
+   và xử lý stdout rỗng. Registry Uninstall có bản ghi trùng → dedupe (name,version) trước
+   bulk_create vì `unique_together`.
+4. **DRF field `source="package_version.package.name"` an toàn khi FK None:** sau khi cho
+   `package_version` nullable (reboot/shutdown/inventory), các read-only field lồng nhau tự
+   trả None (DRF `get_attribute` ngắt chuỗi ở None) — không cần `allow_null`, không crash.
+5. **So sánh version trong targeting phải làm ở Python**, không SQL (string compare sai:
+   "118" > "1200"? theo lexicographic là sai). Tách "." → tuple int rồi so. Rule
+   `min_version` chỉ loại máy có bản >= ngưỡng (máy bản cũ vẫn cần nâng cấp).
+**Áp dụng:** Khi engine đã bọc command + thu exit-code/stdout theo file, mở rộng loại tác
+vụ là bài toán "sinh command + payload", đừng viết executor mới. Bất kỳ tác vụ nào làm rớt
+kết nối (reboot/shutdown/logoff) phải trì hoãn đủ để thu kết quả trước.
+
 ## 2026-07-03 — JsonFormatter: lọc field `extra` bằng danh sách reserved của LogRecord
 **Bối cảnh:** Viết JsonFormatter opt-in (env DJANGO_LOG_JSON) để log JSON cho ELK/Datadog.
 Muốn gộp field `extra` (vd `logger.info(..., extra={"job_id": 5})`) vào JSON nhưng không
@@ -94,10 +152,10 @@ kiểm tra services/ports/volumes/healthcheck qua dict.
 ## 2026-07-02 — makemigrations/pytest phải dùng settings.test (sqlite)
 **Bối cảnh:** `manage.py makemigrations` với settings `dev` fail vì `dev` dùng PostgreSQL
 nhưng venv chưa cài `psycopg`; lỗi `ImproperlyConfigured: Error loading psycopg2`.
-**Bài học:** Dự án có sẵn `pydeploy.settings.test` chạy SQLite in-file, dành riêng cho
+**Bài học:** Dự án có sẵn `ryandeploy.settings.test` chạy SQLite in-file, dành riêng cho
 `check`/`makemigrations`/`pytest` không cần Postgres.
 **Áp dụng:** Mọi lệnh Django cục bộ (check, makemigrations, migrate, pytest) đặt
-`DJANGO_SETTINGS_MODULE=pydeploy.settings.test`. Dùng python từ `.venv/Scripts/python.exe`.
+`DJANGO_SETTINGS_MODULE=ryandeploy.settings.test`. Dùng python từ `.venv/Scripts/python.exe`.
 
 ## 2026-07-02 — PowerShell here-string vỡ với ký tự tiếng Việt trong git commit -m
 **Bối cảnh:** `git commit -m @'...'@` chứa "Cấu hình AD" bị PowerShell tách sai thành

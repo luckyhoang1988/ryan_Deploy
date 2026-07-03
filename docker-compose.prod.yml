@@ -1,21 +1,21 @@
 # Production compose — KHÁC dev ở các điểm an toàn:
-#  - DJANGO_SETTINGS_MODULE=pydeploy.settings.prod (DEBUG off, cookie secure, CORS đóng).
+#  - DJANGO_SETTINGS_MODULE=ryandeploy.settings.prod (DEBUG off, cookie secure, CORS đóng).
 #  - KHÔNG mount source ./backend vào container (chỉ chạy code trong image đã build).
 #  - KHÔNG publish Postgres/Redis ra host (chỉ truy cập nội bộ qua network compose).
 #  - worker/beat có healthcheck và chờ Postgres/Redis healthy.
-# Yêu cầu file .env cung cấp: DJANGO_SECRET_KEY, PYDEPLOY_VAULT_KEY, POSTGRES_PASSWORD.
+# Yêu cầu file .env cung cấp: DJANGO_SECRET_KEY, RYANDEPLOY_VAULT_KEY, POSTGRES_PASSWORD.
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-pydeploy}
-      POSTGRES_USER: ${POSTGRES_USER:-pydeploy}
+      POSTGRES_DB: ${POSTGRES_DB:-ryandeploy}
+      POSTGRES_USER: ${POSTGRES_USER:-ryandeploy}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD phải được đặt ở production}
     volumes:
       - pgdata:/var/lib/postgresql/data
     # Không publish port ra host ở production.
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pydeploy}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ryandeploy}"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -33,9 +33,9 @@ services:
     build: ./backend
     command: >
       sh -c "python manage.py migrate &&
-             gunicorn pydeploy.wsgi:application --bind 0.0.0.0:8000 --workers 3"
+             gunicorn ryandeploy.wsgi:application --bind 0.0.0.0:8000 --workers 3"
     environment:
-      DJANGO_SETTINGS_MODULE: pydeploy.settings.prod
+      DJANGO_SETTINGS_MODULE: ryandeploy.settings.prod
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
     env_file:
@@ -53,9 +53,9 @@ services:
 
   worker:
     build: ./backend
-    command: celery -A pydeploy worker --loglevel=info --concurrency=${PYDEPLOY_MAX_CONCURRENCY:-15}
+    command: celery -A ryandeploy worker --loglevel=info --concurrency=${RYANDEPLOY_MAX_CONCURRENCY:-15}
     environment:
-      DJANGO_SETTINGS_MODULE: pydeploy.settings.prod
+      DJANGO_SETTINGS_MODULE: ryandeploy.settings.prod
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
     env_file:
@@ -63,7 +63,7 @@ services:
     volumes:
       - media:/app/media
     healthcheck:
-      test: ["CMD-SHELL", "celery -A pydeploy inspect ping -d celery@$$HOSTNAME"]
+      test: ["CMD-SHELL", "celery -A ryandeploy inspect ping -d celery@$$HOSTNAME"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -77,11 +77,11 @@ services:
   beat:
     build: ./backend
     command: >
-      celery -A pydeploy beat --loglevel=info
+      celery -A ryandeploy beat --loglevel=info
       --scheduler django_celery_beat.schedulers:DatabaseScheduler
       --pidfile=/tmp/celerybeat.pid
     environment:
-      DJANGO_SETTINGS_MODULE: pydeploy.settings.prod
+      DJANGO_SETTINGS_MODULE: ryandeploy.settings.prod
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
     env_file:
