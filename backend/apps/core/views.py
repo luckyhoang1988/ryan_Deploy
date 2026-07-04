@@ -121,6 +121,88 @@ def stats(request):
     )
 
 
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def report(request):
+    """Số liệu chi tiết cho biểu đồ báo cáo trên dashboard.
+
+    Trả về: phân bố trạng thái job/deployment, máy online/offline, và
+    timeline 14 ngày gần nhất (số job hoàn tất mỗi ngày, tách thành công/thất bại).
+    """
+    from datetime import timedelta
+
+    from django.db.models import Count, Q
+    from django.db.models.functions import TruncDate
+    from django.utils import timezone
+
+    from apps.deployments.models import Deployment, DeploymentStatus
+    from apps.jobs.models import Job, JobStatus
+    from apps.machines.models import Machine
+
+    job_raw = {r["status"]: r["c"] for r in Job.objects.values("status").annotate(c=Count("id"))}
+    jobs_by_status = {
+        "success": job_raw.get(JobStatus.SUCCESS, 0) + job_raw.get(JobStatus.SUCCESS_REBOOT, 0),
+        "failed": job_raw.get(JobStatus.FAILED, 0),
+        "running": (
+            job_raw.get(JobStatus.PENDING, 0)
+            + job_raw.get(JobStatus.QUEUED, 0)
+            + job_raw.get(JobStatus.RUNNING, 0)
+        ),
+        "skipped": job_raw.get(JobStatus.SKIPPED, 0),
+        "cancelled": job_raw.get(JobStatus.CANCELLED, 0),
+    }
+
+    dep_raw = {
+        r["status"]: r["c"] for r in Deployment.objects.values("status").annotate(c=Count("id"))
+    }
+    deployments_by_status = {s.value: dep_raw.get(s.value, 0) for s in DeploymentStatus}
+
+    machines_online = Machine.objects.filter(is_online=True).count()
+    machines_total = Machine.objects.count()
+
+    # Timeline 14 ngày: job hoàn tất mỗi ngày (theo finished_at, múi giờ dự án).
+    today = timezone.localdate()
+    start = today - timedelta(days=13)
+    tl_raw = {
+        r["day"]: r
+        for r in (
+            Job.objects.filter(finished_at__date__gte=start)
+            .annotate(day=TruncDate("finished_at"))
+            .values("day")
+            .annotate(
+                success=Count(
+                    "id",
+                    filter=Q(status__in=[JobStatus.SUCCESS, JobStatus.SUCCESS_REBOOT]),
+                ),
+                failed=Count("id", filter=Q(status=JobStatus.FAILED)),
+            )
+        )
+    }
+    timeline = []
+    for i in range(14):
+        d = start + timedelta(days=i)
+        row = tl_raw.get(d)
+        timeline.append(
+            {
+                "date": d.isoformat(),
+                "success": row["success"] if row else 0,
+                "failed": row["failed"] if row else 0,
+            }
+        )
+
+    return Response(
+        {
+            "jobs_by_status": jobs_by_status,
+            "deployments_by_status": deployments_by_status,
+            "machines": {
+                "online": machines_online,
+                "offline": machines_total - machines_online,
+            },
+            "timeline": timeline,
+        }
+    )
+
+
 class UserViewSet(viewsets.ModelViewSet):
     """
     Quản lý người dùng + vai trò (RBAC). Chỉ admin thao tác.

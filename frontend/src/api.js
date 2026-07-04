@@ -62,6 +62,7 @@ export const api = {
   logout: () => request("POST", "/auth/logout/"),
   me: () => request("GET", "/auth/me/"),
   stats: () => request("GET", "/stats/"),
+  report: () => request("GET", "/report/"),
 };
 
 // Trả về mảng results (hỗ trợ cả paginated lẫn list thô)

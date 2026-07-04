@@ -14,6 +14,21 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-04 — Biểu đồ SVG thuần: pathLength=100 + biến CSS phải qua style, không qua attribute
+**Bối cảnh:** Dựng donut/bar báo cáo dashboard bằng SVG nội tuyến (không thêm thư viện chart).
+**Bài học:**
+1. **Donut không cần tính chu vi:** đặt `pathLength={100}` trên `<circle>` → `strokeDasharray`
+   và `strokeDashoffset` tính theo đơn vị %; mỗi slice là 1 circle với dasharray `${pct} ${100-pct}`,
+   `strokeDashoffset={-acc}` (acc = % cộng dồn), cả nhóm `transform="rotate(-90 cx cy)"` để bắt đầu
+   từ đỉnh. Không phải nhân/chia 2πr.
+2. **Gotcha màu:** biến CSS chỉ resolve khi là CSS property, KHÔNG resolve khi là presentation
+   attribute. `fill="var(--green)"` (attribute) → không hiện màu; phải dùng `style={{ fill: "var(--green)" }}`
+   hoặc `style={{ stroke: ... }}`. Áp dụng cho mọi màu theo theme trong SVG.
+3. **Tooltip nhẹ không cần JS:** `<title>` con trong `<rect>`/`<circle>` cho hover text native,
+   accessible — đủ cho chart đơn giản, khỏi state/portal.
+**Áp dụng:** Chart SVG trong dự án này: pathLength=100 cho arc, màu theme qua `style` không qua
+attribute, `<title>` cho hover. Verify bằng `npm run build` + gọi endpoint thật, không chỉ đọc code.
+
 ## 2026-07-03 — "False success": installer trả exit 0 nhưng không cài (Firefox stub) + hậu kiểm
 **Bối cảnh:** Deploy Firefox báo "Thành công" (exit 0, 2/2 máy) nhưng máy không có Firefox.
 File upload chỉ 493 KB = **Firefox online stub installer** (trình tải nhỏ), không phải bộ cài.
