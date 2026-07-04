@@ -252,6 +252,8 @@ label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px
 .legend .swatch { width: 11px; height: 11px; border-radius: 3px; flex: none; }
 .legend .legend-label { color: var(--text); }
 .legend .legend-value { color: var(--muted); font-weight: 600; margin-left: auto; padding-left: 10px; }
+.gauge { flex-direction: column; gap: 6px; }
+.gauge-sub { font-size: 13px; }
 .chart-wide { width: 100%; overflow-x: auto; }
 .timeline-svg { width: 100%; min-width: 476px; height: 160px; display: block; }
 .bar-label { font-size: 10px; fill: var(--muted); }

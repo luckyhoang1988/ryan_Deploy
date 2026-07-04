@@ -14,6 +14,30 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-04 — Verify UI bằng CDP thô khi không có chromium-cli/Playwright (Windows)
+**Bối cảnh:** Thêm Gauge CPU/RAM real-time vào Dashboard, cần "chạy thật trong trình duyệt"
+nhưng máy Windows này không có `chromium-cli` lẫn Python `playwright` (chưa cài, tải browser
+sẽ chậm/tốn).
+**Bài học:**
+1. Chrome hệ thống có sẵn tại `C:\Program Files\Google\Chrome\Application\chrome.exe`. Chạy
+   `--headless=new --remote-debugging-port=<port> --user-data-dir=<scratch>` rồi lấy
+   `webSocketDebuggerUrl` qua `GET http://127.0.0.1:<port>/json/version`. Mở tab mới phải
+   dùng **PUT** `http://127.0.0.1:<port>/json/new?<url>` (Chrome bản mới từ chối GET, trả 405).
+2. Package `websockets` đã có sẵn trong venv (dùng cho Channels) — đủ để tự viết driver CDP
+   tối giản (~60 dòng): gửi `{id, method, params}` qua JSON, khớp response theo `id`.
+3. **Điền input React controlled** không dùng `el.value=...` (không bắn onChange) mà dùng
+   `el.focus(); document.execCommand('insertText', false, text)` — bắn input event thật,
+   React nhận đúng. `form.requestSubmit()` để submit như người dùng thật.
+4. Venv của dự án nằm ở **gốc repo** (`ryan_deploy/.venv`), không phải `backend/.venv`.
+5. **Gotcha nguy hiểm:** `taskkill //F //IM node.exe //T` giết TẤT CẢ tiến trình node.exe
+   trên máy (kể cả của project/tool khác đang chạy), không chỉ tiến trình Vite mình vừa mở.
+   Phải tìm đúng PID (qua `netstat -ano` lọc theo port, hoặc lưu PID lúc `disown`) rồi
+   `taskkill //F //PID <pid>` — không bao giờ diệt theo tên process dùng chung như node/python.
+**Áp dụng:** Khi cần chụp màn hình xác nhận UI trên máy Windows không có sẵn công cụ
+automation: dùng Chrome hệ thống + CDP thô qua `websockets`. Luôn dọn sạch (kill đúng PID,
+xoá `test_db.sqlite3`/profile tạm) sau khi verify xong, và không bao giờ `taskkill` theo tên
+tiến trình dùng chung.
+
 ## 2026-07-04 — Channels/WebSocket: daphne xung đột impacket, channels.testing cũng ăn theo
 **Bối cảnh:** Thêm real-time (Django Channels) cho panel "Đang chạy" + live progress deploy,
 theo kế hoạch ban đầu dùng `daphne` làm ASGI server (khuyến nghị phổ biến cho Channels).

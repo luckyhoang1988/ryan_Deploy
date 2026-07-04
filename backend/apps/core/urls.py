@@ -13,6 +13,7 @@ urlpatterns = [
     path("auth/me/", views.me, name="auth-me"),
     path("stats/", views.stats, name="stats"),
     path("report/", views.report, name="report"),
+    path("server-stats/", views.server_stats, name="server-stats"),
     path("tasks/<str:task_id>/", views.task_status, name="task-status"),
     *router.urls,
 ]

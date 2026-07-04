@@ -123,6 +123,28 @@ def stats(request):
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
+def server_stats(request):
+    """CPU/RAM/Disk real-time của chính máy server (host chạy backend)."""
+    import psutil
+
+    vm = psutil.virtual_memory()
+    disk = psutil.disk_usage("/")
+    return Response(
+        {
+            "cpu_percent": psutil.cpu_percent(interval=0.1),
+            "cpu_count": psutil.cpu_count() or 1,
+            "ram_percent": vm.percent,
+            "ram_used_gb": round(vm.used / (1024**3), 1),
+            "ram_total_gb": round(vm.total / (1024**3), 1),
+            "disk_percent": disk.percent,
+            "disk_used_gb": round(disk.used / (1024**3), 1),
+            "disk_total_gb": round(disk.total / (1024**3), 1),
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
 def report(request):
     """Số liệu chi tiết cho biểu đồ báo cáo trên dashboard.
 

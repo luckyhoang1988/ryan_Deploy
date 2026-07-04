@@ -28,3 +28,6 @@ ldap3==2.9.1
 # --- Credential vault (encryption at-rest) ---
 # Bị chặn <43 bởi impacket 0.12.0 (ghim pyOpenSSL==24.0.0 -> cryptography<43).
 cryptography==42.0.8
+
+# --- Server monitoring (CPU/RAM real-time) ---
+psutil==6.1.1

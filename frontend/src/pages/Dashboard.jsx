@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import Icon from "../components/Icon";
-import { Donut, TimelineBars } from "../components/Charts";
+import { Donut, Gauge, TimelineBars } from "../components/Charts";
+
+const SERVER_STATS_INTERVAL_MS = 3000;
 
 const CARDS = [
   { key: "packages", label: "Packages", icon: "package", tone: "cyan" },
@@ -44,11 +46,27 @@ function toDonutData(slices, counts) {
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
   const [report, setReport] = useState(null);
+  const [serverStats, setServerStats] = useState(null);
   const [err, setErr] = useState("");
 
   useEffect(() => {
     api.stats().then(setStats).catch((e) => setErr(e.message));
     api.report().then(setReport).catch((e) => setErr(e.message));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () =>
+      api
+        .serverStats()
+        .then((d) => !cancelled && setServerStats(d))
+        .catch(() => {});
+    tick();
+    const id = setInterval(tick, SERVER_STATS_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, []);
 
   return (
@@ -70,6 +88,45 @@ export default function Dashboard() {
             </div>
           </div>
         ))}
+      </div>
+
+      <div className="page-head mt-lg">
+        <h3>Tài nguyên máy chủ</h3>
+        <p className="muted">CPU / RAM / Ổ đĩa thời gian thực của máy server</p>
+      </div>
+      <div className="chart-grid">
+        <div className="card">
+          <div className="chart-title">CPU</div>
+          <Gauge
+            value={serverStats?.cpu_percent}
+            label="CPU"
+            sub={serverStats ? `${serverStats.cpu_count} lõi` : "Đang tải…"}
+          />
+        </div>
+        <div className="card">
+          <div className="chart-title">RAM</div>
+          <Gauge
+            value={serverStats?.ram_percent}
+            label="RAM"
+            sub={
+              serverStats
+                ? `${serverStats.ram_used_gb} / ${serverStats.ram_total_gb} GB`
+                : "Đang tải…"
+            }
+          />
+        </div>
+        <div className="card">
+          <div className="chart-title">Ổ đĩa</div>
+          <Gauge
+            value={serverStats?.disk_percent}
+            label="Disk"
+            sub={
+              serverStats
+                ? `${serverStats.disk_used_gb} / ${serverStats.disk_total_gb} GB`
+                : "Đang tải…"
+            }
+          />
+        </div>
       </div>
 
       <div className="page-head mt-lg">

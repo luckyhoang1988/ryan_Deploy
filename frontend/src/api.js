@@ -63,6 +63,7 @@ export const api = {
   me: () => request("GET", "/auth/me/"),
   stats: () => request("GET", "/stats/"),
   report: () => request("GET", "/report/"),
+  serverStats: () => request("GET", "/server-stats/"),
 };
 
 // Trả về mảng results (hỗ trợ cả paginated lẫn list thô)
