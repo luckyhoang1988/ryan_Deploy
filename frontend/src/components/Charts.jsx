@@ -2,7 +2,7 @@
 // Màu truyền theo entity/trạng thái (dùng biến CSS của theme), luôn kèm nhãn ở chú giải.
 
 // Donut: data = [{ key, label, value, color }]. Bỏ qua slice value=0.
-export function Donut({ data, size = 168, thickness = 22 }) {
+export function Donut({ data, size = 132, thickness = 17 }) {
   const items = data.filter((d) => d.value > 0);
   const total = items.reduce((s, d) => s + d.value, 0);
   const r = (size - thickness) / 2;
@@ -75,9 +75,9 @@ export function usageColor(pct) {
 }
 
 // Cột chồng theo ngày: data = [{ date, success, failed }] (14 phần tử).
-export function TimelineBars({ data, height = 160 }) {
-  const step = 34;
-  const barW = 20;
+export function TimelineBars({ data, height = 140 }) {
+  const step = 22;
+  const barW = 13;
   const padTop = 10;
   const padBottom = 22;
   const plot = height - padTop - padBottom;

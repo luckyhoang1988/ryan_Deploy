@@ -120,7 +120,7 @@ export default function Dashboard() {
         <h3>Báo cáo</h3>
         <p className="muted">Phân bố trạng thái và hoạt động 14 ngày gần nhất</p>
       </div>
-      <div className="chart-grid">
+      <div className="report-row">
         <div className="card">
           <div className="chart-title">Trạng thái Job</div>
           <Donut data={toDonutData(JOB_SLICES, report?.jobs_by_status)} />
@@ -133,7 +133,7 @@ export default function Dashboard() {
           <div className="chart-title">Máy trạm</div>
           <Donut data={toDonutData(MACHINE_SLICES, report?.machines)} />
         </div>
-        <div className="card chart-span">
+        <div className="card report-wide">
           <div className="chart-title">Job hoàn tất theo ngày (14 ngày)</div>
           {report ? (
             <TimelineBars data={report.timeline} />
