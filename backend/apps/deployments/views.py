@@ -45,6 +45,14 @@ class DeploymentViewSet(viewsets.ModelViewSet):
     )
     serializer_class = DeploymentSerializer
 
+    def get_queryset(self):
+        # ?status=running — dùng cho panel "Đang chạy" toàn cục (Layout.jsx).
+        qs = super().get_queryset()
+        status_param = self.request.query_params.get("status")
+        if status_param:
+            qs = qs.filter(status=status_param)
+        return qs
+
     def get_throttles(self):
         # Chống spam các action ghi/tốn kém (trigger/cancel có thể đẩy hàng trăm máy).
         # Các action đọc khác không giới hạn thêm (ngoài throttle mặc định).

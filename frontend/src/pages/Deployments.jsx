@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api, listOf, fetchAll } from "../api";
 import { StatusBadge } from "../components/Layout";
 import { useAuth } from "../auth";
+import { subscribe } from "../ws";
 
 export default function Deployments() {
   const { hasRole } = useAuth();
@@ -18,6 +19,18 @@ export default function Deployments() {
 
   useEffect(() => {
     load();
+  }, []);
+
+  // WebSocket real-time: patch đúng dòng theo id thay vì phải load lại cả trang.
+  useEffect(() => {
+    return subscribe("deployment.update", (data) => {
+      setDeployments((prev) => {
+        // Deployment mới tạo lúc trang đang mở (vd lịch lặp tự kích hoạt) → không có
+        // trong state hiện tại, bỏ qua thay vì chèn bản ghi thiếu field name/package_name.
+        if (!prev.some((d) => d.id === data.id)) return prev;
+        return prev.map((d) => (d.id === data.id ? { ...d, ...data } : d));
+      });
+    });
   }, []);
 
   const remove = async (d) => {

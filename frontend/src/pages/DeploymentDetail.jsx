@@ -2,42 +2,11 @@ import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { api, listOf } from "../api";
 import { StatusBadge } from "../components/Layout";
+import DeployProgress from "../components/DeployProgress";
+import { subscribe } from "../ws";
 
 // Deployment ở các trạng thái này đã kết thúc → ngừng poll.
 const TERMINAL = ["completed", "completed_errors", "failed", "cancelled"];
-
-// Thanh % tiến trình deploy: xanh = thành công, đỏ = lỗi, sọc vàng = đang chạy.
-// % hoàn tất = (thành công + lỗi) / tổng số máy.
-function DeployProgress({ dep }) {
-  const total = dep.total_count || 0;
-  const success = dep.success_count || 0;
-  const failed = dep.failed_count || 0;
-  const pending = dep.pending_count || 0;
-  const done = success + failed;
-  // Máy đang chạy = tổng trừ đã xong trừ chờ (kẹp về 0 nếu số liệu lệch nhất thời).
-  const running = Math.max(total - done - pending, 0);
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-  const w = (n) => (total > 0 ? `${(n / total) * 100}%` : "0%");
-
-  return (
-    <div className="progress-wrap">
-      <div className="progress-head">
-        <span className="progress-pct">{pct}%</span>
-        <span className="progress-sub">
-          {done}/{total} máy đã xong
-          {running > 0 && ` · ${running} đang chạy`}
-          {pending > 0 && ` · ${pending} chờ`}
-        </span>
-      </div>
-      <div className="progress-track" role="progressbar"
-        aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
-        <div className="progress-seg success" style={{ width: w(success) }} />
-        <div className="progress-seg failed" style={{ width: w(failed) }} />
-        <div className="progress-seg running" style={{ width: w(running) }} />
-      </div>
-    </div>
-  );
-}
 
 export default function DeploymentDetail() {
   const { id } = useParams();
@@ -64,11 +33,29 @@ export default function DeploymentDetail() {
   }, [id]);
 
   // Poll real-time mỗi 3s, nhưng DỪNG khi deployment đã kết thúc (tránh gọi API vô hạn).
+  // Vẫn giữ làm lưới an toàn — WebSocket bên dưới cập nhật ngay lập tức, poll chỉ để
+  // trang không "đứng hình" nếu WS rớt kết nối.
   useEffect(() => {
     if (!dep || TERMINAL.includes(dep.status)) return;
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
   }, [id, dep?.status]);
+
+  // WebSocket real-time: patch state ngay khi có message khớp deployment/job này.
+  useEffect(() => {
+    const offDep = subscribe("deployment.update", (data) => {
+      if (String(data.id) !== String(id)) return;
+      setDep((prev) => (prev ? { ...prev, ...data } : prev));
+    });
+    const offJob = subscribe("job.update", (data) => {
+      if (String(data.deployment_id) !== String(id)) return;
+      setJobs((prev) => prev.map((j) => (j.id === data.id ? { ...j, ...data } : j)));
+    });
+    return () => {
+      offDep();
+      offJob();
+    };
+  }, [id]);
 
   const retrigger = async () => {
     // Xác nhận trước: chạy lại có thể đẩy tới hàng trăm máy — tránh click nhầm.

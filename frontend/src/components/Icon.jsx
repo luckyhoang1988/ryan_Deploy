@@ -100,6 +100,15 @@ const PATHS = {
       <polyline points="12 6 12 12 16 14" />
     </>
   ),
+  folder: <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />,
+  folderOpen: (
+    <>
+      <path d="M3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-8l-2-3H5a2 2 0 0 0-2 2v1z" />
+      <path d="M3 7l2.5 3h13.5" />
+    </>
+  ),
+  chevronRight: <polyline points="9 18 15 12 9 6" />,
+  chevronDown: <polyline points="6 9 12 15 18 9" />,
 };
 
 export default function Icon({ name, size = 18, className = "" }) {

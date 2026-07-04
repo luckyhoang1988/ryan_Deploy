@@ -12,9 +12,10 @@ from apps.audit.models import AuditLog
 from apps.core.permissions import IsAdmin, IsOperatorOrAbove
 
 from . import updates as updates_svc
-from .models import APPROVED_VERSIONS_ATTR, Package, PackageDownload, PackageVersion
+from .models import APPROVED_VERSIONS_ATTR, Package, PackageDownload, PackageFolder, PackageVersion
 from .serializers import (
     PackageDownloadSerializer,
+    PackageFolderSerializer,
     PackageSerializer,
     PackageVersionSerializer,
 )
@@ -23,7 +24,8 @@ from .serializers import (
 class PackageViewSet(viewsets.ModelViewSet):
     # prefetch_related("versions") cho field lồng `versions` trong serializer; Prefetch
     # riêng (to_attr) cho `latest_version` để tránh mỗi package tự query lại (N+1 khi list).
-    queryset = Package.objects.prefetch_related(
+    # select_related("folder") cho field `folder` (FK) — tránh N+1 khi liệt kê nhiều package.
+    queryset = Package.objects.select_related("folder").prefetch_related(
         "versions",
         Prefetch(
             "versions",
@@ -110,6 +112,24 @@ class PackageViewSet(viewsets.ModelViewSet):
             target=instance,
             package=name,
         )
+
+
+class PackageFolderViewSet(viewsets.ModelViewSet):
+    """Cây thư mục Package Library (mirror PDQ Deploy) — chỉ admin được tạo/sửa/xóa."""
+
+    queryset = PackageFolder.objects.all()
+    serializer_class = PackageFolderSerializer
+    permission_classes = [IsAdmin]
+
+    def perform_destroy(self, instance):
+        # Chặn xóa folder còn package hoặc folder con — tránh package/folder "mồ côi"
+        # biến mất khỏi cây mà admin không hay (folder.package FK là SET_NULL, không CASCADE).
+        if instance.packages.exists() or instance.children.exists():
+            raise ValidationError(
+                "Không thể xóa thư mục còn package hoặc thư mục con bên trong. "
+                "Hãy chuyển/xóa chúng trước."
+            )
+        instance.delete()
 
 
 class PackageVersionViewSet(viewsets.ModelViewSet):

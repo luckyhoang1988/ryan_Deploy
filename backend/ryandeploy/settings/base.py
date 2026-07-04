@@ -46,6 +46,7 @@ INSTALLED_APPS = [
     # 3rd party
     "rest_framework",
     "corsheaders",
+    "channels",
     "django_celery_results",
     "django_celery_beat",
     # RyanDeploy apps
@@ -88,6 +89,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "ryandeploy.wsgi.application"
+ASGI_APPLICATION = "ryandeploy.asgi.application"
 
 DATABASES = {
     "default": {
@@ -152,6 +154,15 @@ CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
         "LOCATION": REDIS_URL,
+    }
+}
+
+# --- Channels (WebSocket real-time deployment/job) ---
+# Dùng lại REDIS_URL đã có cho Celery/cache — không cần hạ tầng mới.
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {"hosts": [REDIS_URL]},
     }
 }
 

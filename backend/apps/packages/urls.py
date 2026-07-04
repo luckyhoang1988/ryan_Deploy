@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     PackageDownloadViewSet,
+    PackageFolderViewSet,
     PackageVersionViewSet,
     PackageViewSet,
     UpdateDeployView,
@@ -11,6 +12,7 @@ from .views import (
 
 router = DefaultRouter()
 router.register("packages", PackageViewSet, basename="package")
+router.register("package-folders", PackageFolderViewSet, basename="packagefolder")
 router.register("package-versions", PackageVersionViewSet, basename="packageversion")
 router.register("package-downloads", PackageDownloadViewSet, basename="packagedownload")
 

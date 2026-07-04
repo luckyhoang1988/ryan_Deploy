@@ -10,6 +10,10 @@ from apps.core.models import TimeStampedModel
 #                 .order_by("-created_at"), to_attr=APPROVED_VERSIONS_ATTR)
 APPROVED_VERSIONS_ATTR = "_approved_versions_prefetched"
 
+# Tên 3 thư mục gốc mặc định của cây Package Library (mirror PDQ Deploy), seed bởi
+# migration 0005 và dùng lại bởi catalog_seed.py khi gán folder cho package mới.
+DEFAULT_FOLDER_NAME = "Packages"
+
 
 class InstallerType(models.TextChoices):
     MSI = "msi", "Windows Installer (.msi)"
@@ -38,12 +42,33 @@ def installer_upload_path(instance, filename):
     return f"repository/{pkg.id}_{pkg.name}/{instance.version}/{filename}"
 
 
+class PackageFolder(TimeStampedModel):
+    """Thư mục cây điều hướng Package Library (mirror PDQ Deploy: Packages/Custom
+    Packages/Remove Updates...). Lồng nhau qua `parent` (adjacency-list, đủ dùng cho
+    độ sâu nông của cây này — không cần MPTT/treebeard)."""
+
+    name = models.CharField(max_length=255)
+    parent = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.CASCADE, related_name="children"
+    )
+
+    class Meta:
+        ordering = ["name"]
+        unique_together = ("parent", "name")
+
+    def __str__(self):
+        return self.name
+
+
 class Package(TimeStampedModel):
     """Một phần mềm cần triển khai (VD Microsoft Office, 7-Zip)."""
 
     name = models.CharField(max_length=255, unique=True, db_index=True)
     vendor = models.CharField(max_length=255, blank=True)
     description = models.TextField(blank=True)
+    folder = models.ForeignKey(
+        PackageFolder, null=True, blank=True, on_delete=models.SET_NULL, related_name="packages"
+    )
 
     # System requirements (dùng để kiểm tra điều kiện cài đặt)
     min_os = models.CharField(max_length=128, blank=True)

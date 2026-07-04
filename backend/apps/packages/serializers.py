@@ -2,7 +2,28 @@ from django.conf import settings
 from rest_framework import serializers
 
 from . import repository
-from .models import InstallerType, Package, PackageDownload, PackageVersion
+from .models import InstallerType, Package, PackageDownload, PackageFolder, PackageVersion
+
+
+class PackageFolderSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PackageFolder
+        fields = ["id", "name", "parent", "created_at"]
+
+    def validate_parent(self, parent):
+        # Chặn đặt cha là chính nó hoặc hậu duệ của nó — nếu không, dựng cây (đệ quy theo
+        # parent ở frontend) sẽ lặp vô hạn. Chỉ áp dụng khi sửa (self.instance có sẵn);
+        # folder mới tạo không thể là tổ tiên của chính nó.
+        if parent is None or self.instance is None:
+            return parent
+        node = parent
+        while node is not None:
+            if node.pk == self.instance.pk:
+                raise serializers.ValidationError(
+                    "Không thể đặt thư mục cha là chính nó hoặc thư mục con của nó."
+                )
+            node = node.parent
+        return parent
 
 
 class PackageVersionSerializer(serializers.ModelSerializer):
@@ -102,6 +123,7 @@ class PackageSerializer(serializers.ModelSerializer):
             "name",
             "vendor",
             "description",
+            "folder",
             "min_os",
             "min_ram_gb",
             "min_disk_gb",

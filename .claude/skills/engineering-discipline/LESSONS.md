@@ -14,6 +14,44 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-04 — Channels/WebSocket: daphne xung đột impacket, channels.testing cũng ăn theo
+**Bối cảnh:** Thêm real-time (Django Channels) cho panel "Đang chạy" + live progress deploy,
+theo kế hoạch ban đầu dùng `daphne` làm ASGI server (khuyến nghị phổ biến cho Channels).
+**Bài học:**
+1. **`daphne` KHÔNG tương thích với dự án này** — nó ghim cứng `twisted[tls]>=22.4`, mà
+   `twisted[tls]` đòi `pyopenssl>=25.2.0`; trong khi `impacket==0.12.0` ghim cứng
+   `pyOpenSSL==24.0.0` (xem [[cryptography-pin-impacket-conflict]]). Hai ràng buộc này
+   loại trừ nhau tuyệt đối — không có version daphne nào né được vì pin nằm ở tầng
+   twisted, không phải ở daphne. Giải: dùng **uvicorn + websockets** (thuần Python, không
+   phụ thuộc OpenSSL binding nào) làm ASGI server thay thế; `INSTALLED_APPS` KHÔNG cần
+   thêm `"daphne"` (đó là trick riêng của daphne để `manage.py runserver` tự ASGI-aware) —
+   thay vào đó dev/prod phải chạy `uvicorn ryandeploy.asgi:application` tường minh
+   (`manage.py runserver` vẫn chỉ là WSGI, không phục vụ được WebSocket).
+2. **`channels.testing` (package, không phải submodule) import cứng `daphne.testing` ngay
+   ở `__init__.py`** — nên dù chỉ cần `WebsocketCommunicator`, bất kỳ import nào xuyên qua
+   `channels.testing.*` đều crash nếu không cài daphne (import submodule cũng không né
+   được vì Python luôn chạy `__init__.py` của package cha trước). Giải: tự viết lại
+   `WebsocketCommunicator` tối giản (~30 dòng) trên `asgiref.testing.ApplicationCommunicator`
+   (lớp nền thật sự, nằm ngoài `channels.testing`) — xem `backend/tests/test_realtime.py`.
+3. **Trước khi pin version mới cho bất kỳ lib nào, chạy `pip install` thật trong venv rồi
+   `pip check`** — phát hiện xung đột sớm (ở đây: cài xong mới thấy `cryptography` bị kéo
+   lên 49.0.0, `pyOpenSSL` lên 26.3.0, phá pin cũ) thay vì chỉ đọc changelog/tin vào version
+   number. `pip index versions <pkg>` cho danh sách version thật để chọn bản mới nhất hợp lệ
+   thay vì đoán.
+4. **Kiểm thử real-time qua HTTP+WS thật (không chỉ pytest với scope tự dựng) lộ ra bug mà
+   test giả không thấy:** script smoke test dùng `requests` (login lấy session cookie thật)
+   + `websockets` client thật gọi `/ws/updates/` với header `Cookie`, xác nhận
+   `AuthMiddlewareStack` đọc đúng session. Bug thực tế gặp: gửi `target_machines: []` khi
+   tạo Deployment bị 400 (M2M không `blank=True` mặc định `allow_empty=False`, giống lỗi cũ
+   ở DeploymentSchedule) nhưng code không kiểm `status_code` trước khi dùng `.json()["id"]`
+   → không lỗi ngay mà TREO VÔ HẠN ở `await ws.recv()` chờ message không bao giờ tới. Luôn
+   `assert r.status_code == 201` trước khi dùng response, và bọc `ws.recv()` bằng
+   `asyncio.wait_for(..., timeout=N)` để lỗi hiện ngay thay vì treo.
+**Áp dụng:** Dự án này VĨNH VIỄN không dùng được `daphne`/bất kỳ gì kéo theo
+`twisted[tls]` trong khi còn ghim `impacket`. Channel layer dùng lại Redis đã có sẵn cho
+Celery (không cần hạ tầng mới). Khi viết test Channels, tự dựng communicator tối giản thay
+vì import `channels.testing`.
+
 ## 2026-07-04 — Recurring schedule: model "template" tách khỏi Deployment "instance" để giữ lịch sử
 **Bối cảnh:** Thêm lịch lặp (interval/weekly, kiểu PDQ Repeating/Recurring). Deployment vốn
 đã có `scheduled_at` cho lịch CHẠY-1-LẦN, và `Job` có `unique_together(deployment, machine)`

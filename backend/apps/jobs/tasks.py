@@ -9,6 +9,7 @@ import logging
 from celery import shared_task
 from django.utils import timezone
 
+from apps.core.realtime.broadcast import broadcast_job_step
 from apps.executor import PushExecutor
 from apps.executor.push_executor import ExecutorError
 
@@ -93,8 +94,10 @@ def _run_job(self, job, deployment, machine, credential, pv):
             return {"job_id": job_id, "status": "failed", "error": "integrity_mismatch"}
 
     def progress(step, message):
-        # Cập nhật step hiện tại (nhẹ, chỉ 1 field)
+        # Cập nhật step hiện tại (nhẹ, chỉ 1 field) — dùng update() nên KHÔNG kích hoạt
+        # post_save signal (signals.py), phải broadcast tường minh ở đây.
         Job.objects.filter(pk=job.pk).update(current_step=step)
+        broadcast_job_step(job.pk, deployment.id, step)
 
     def is_cancelled():
         # Poll trạng thái CANCELLED giữa các bước (đặc biệt trong vòng chờ collect dài) để

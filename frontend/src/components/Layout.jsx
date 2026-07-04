@@ -1,6 +1,10 @@
-import { NavLink } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { NavLink, useNavigate } from "react-router-dom";
+import { api, listOf } from "../api";
 import { useAuth } from "../auth";
+import DeployProgress from "./DeployProgress";
 import Icon from "./Icon";
+import { subscribe } from "../ws";
 
 const NAV = [
   { to: "/", end: true, label: "Dashboard", icon: "grid" },
@@ -38,6 +42,7 @@ export default function Layout({ children }) {
             </NavLink>
           )}
         </nav>
+        <RunningPanel />
       </aside>
       <main className="content">
         <div className="topbar">
@@ -57,6 +62,53 @@ export default function Layout({ children }) {
         </div>
         {children}
       </main>
+    </div>
+  );
+}
+
+// Panel "Đang chạy" toàn cục (kiểu PDQ Deploy) — luôn hiện ở mọi trang, cập nhật real-time
+// qua WebSocket. Nạp danh sách ban đầu 1 lần; sau đó tự thêm/gỡ/patch theo message
+// "deployment.update" thay vì poll.
+function RunningPanel() {
+  const navigate = useNavigate();
+  const [running, setRunning] = useState([]);
+
+  useEffect(() => {
+    api.get("/deployments/?status=running").then((d) => setRunning(listOf(d))).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    return subscribe("deployment.update", (data) => {
+      if (data.status !== "running") {
+        setRunning((prev) => prev.filter((d) => d.id !== data.id));
+        return;
+      }
+      setRunning((prev) => {
+        if (prev.some((d) => d.id === data.id)) {
+          return prev.map((d) => (d.id === data.id ? { ...d, ...data } : d));
+        }
+        // Deployment vừa chuyển sang "running", panel chưa có đủ field (name/package_name)
+        // — nạp bản đầy đủ trong nền rồi thêm vào panel.
+        api
+          .get(`/deployments/${data.id}/`)
+          .then((full) => setRunning((p2) => (p2.some((d) => d.id === full.id) ? p2 : [...p2, full])))
+          .catch(() => {});
+        return prev;
+      });
+    });
+  }, []);
+
+  if (running.length === 0) return null;
+
+  return (
+    <div className="running-panel">
+      <div className="running-panel-title">Đang chạy ({running.length})</div>
+      {running.map((d) => (
+        <button key={d.id} className="running-item" onClick={() => navigate(`/deployments/${d.id}`)}>
+          <div className="running-item-name">{d.name}</div>
+          <DeployProgress dep={d} compact />
+        </button>
+      ))}
     </div>
   );
 }

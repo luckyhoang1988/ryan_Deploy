@@ -1,11 +1,16 @@
 import { Fragment, useEffect, useState } from "react";
-import { api, listOf } from "../api";
+import { api, listOf, fetchAll } from "../api";
 import { useAuth } from "../auth";
+import Icon from "../components/Icon";
 
 export default function Packages() {
   const { hasRole } = useAuth();
   const isAdmin = hasRole("admin");
   const [packages, setPackages] = useState([]);
+  const [folders, setFolders] = useState([]);
+  const [selectedFolder, setSelectedFolder] = useState(null); // null = "Tất cả package"
+  const [expandedFolders, setExpandedFolders] = useState(new Set());
+  const [folderModal, setFolderModal] = useState(null); // {mode:'create'|'rename', folder?, parentId?}
   const [showUpload, setShowUpload] = useState(false);
   const [showFetch, setShowFetch] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -17,10 +22,36 @@ export default function Packages() {
 
   const load = () =>
     api.get("/packages/").then((d) => setPackages(listOf(d))).catch((e) => setErr(e.message));
+  const loadFolders = () =>
+    fetchAll("/package-folders/").then(setFolders).catch((e) => setErr(e.message));
 
   useEffect(() => {
     load();
+    loadFolders();
   }, []);
+
+  const childrenOf = (parentId) => folders.filter((f) => (f.parent ?? null) === parentId);
+  const toggleFolder = (id) =>
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+
+  const removeFolder = async (folder) => {
+    if (!confirm(`Xóa thư mục "${folder.name}"?`)) return;
+    setErr(""); setMsg("");
+    try {
+      await api.del(`/package-folders/${folder.id}/`);
+      if (selectedFolder === folder.id) setSelectedFolder(null);
+      setMsg(`Đã xóa thư mục "${folder.name}".`);
+      loadFolders();
+    } catch (e) { setErr(e.message); }
+  };
+
+  const shownPackages = selectedFolder === null
+    ? packages
+    : packages.filter((p) => p.folder === selectedFolder);
 
   const approveVersion = async (v) => {
     setErr(""); setMsg("");
@@ -81,59 +112,94 @@ export default function Packages() {
       </div>
       {msg && <p className="muted">{msg}</p>}
       {err && <p className="error">{err}</p>}
-      <table>
-        <thead>
-          <tr>
-            <th>Tên</th><th>Vendor</th><th>Versions</th><th>License khả dụng</th>
-            {isAdmin && <th></th>}
-          </tr>
-        </thead>
-        <tbody>
-          {packages.map((p) => {
-            const isOpen = expanded === p.id;
-            return (
-              <Fragment key={p.id}>
-                <tr>
-                  <td>{p.name}</td>
-                  <td className="muted">{p.vendor || "—"}</td>
-                  <td>
-                    <button className="btn ghost" style={{ padding: "2px 8px" }}
-                      onClick={() => setExpanded(isOpen ? null : p.id)}>
-                      {isOpen ? "▾" : "▸"} {p.versions?.length || 0} version
-                    </button>
-                  </td>
-                  <td>{p.available_licenses}</td>
-                  {isAdmin && (
-                    <td>
-                      <div className="row" style={{ gap: 6 }}>
-                        <button className="btn ghost" style={{ padding: "4px 10px" }} onClick={() => setEditPkg(p)}>Sửa</button>
-                        <button className="btn ghost danger" style={{ padding: "4px 10px" }} onClick={() => removePkg(p)}>Xóa</button>
-                      </div>
-                    </td>
-                  )}
-                </tr>
-                {isOpen && (
-                  <tr>
-                    <td colSpan={isAdmin ? 5 : 4} style={{ background: "rgba(0,0,0,0.15)" }}>
-                      <VersionList
-                        pkg={p}
-                        isAdmin={isAdmin}
-                        onEdit={setEditVer}
-                        onDelete={(v) => removeVersion(p, v)}
-                        onApprove={approveVersion}
-                      />
-                    </td>
-                  </tr>
-                )}
-              </Fragment>
-            );
-          })}
-          {packages.length === 0 && (
-            <tr><td colSpan={isAdmin ? 5 : 4} className="muted">Chưa có package.</td></tr>
+      <div className="pkg-layout">
+        <aside className="pkg-tree">
+          <div className={`tree-node${selectedFolder === null ? " active" : ""}`}>
+            <span className="tree-toggle-spacer" />
+            <span className="tree-label" onClick={() => setSelectedFolder(null)}>
+              <Icon name="package" size={15} /> Tất cả package
+            </span>
+          </div>
+          {childrenOf(null).map((f) => (
+            <FolderNode
+              key={f.id}
+              folder={f}
+              depth={0}
+              childrenOf={childrenOf}
+              expanded={expandedFolders}
+              toggleExpand={toggleFolder}
+              selectedFolder={selectedFolder}
+              onSelect={setSelectedFolder}
+              isAdmin={isAdmin}
+              onRename={(folder) => setFolderModal({ mode: "rename", folder })}
+              onDelete={removeFolder}
+            />
+          ))}
+          {isAdmin && (
+            <button
+              className="btn ghost tree-add"
+              onClick={() => setFolderModal({ mode: "create", parentId: selectedFolder })}
+            >
+              + Thư mục
+            </button>
           )}
-        </tbody>
-      </table>
-      {showHistory && isAdmin && <DownloadHistory />}
+        </aside>
+        <div className="pkg-main">
+          <table>
+            <thead>
+              <tr>
+                <th>Tên</th><th>Vendor</th><th>Versions</th><th>License khả dụng</th>
+                {isAdmin && <th></th>}
+              </tr>
+            </thead>
+            <tbody>
+              {shownPackages.map((p) => {
+                const isOpen = expanded === p.id;
+                return (
+                  <Fragment key={p.id}>
+                    <tr>
+                      <td>{p.name}</td>
+                      <td className="muted">{p.vendor || "—"}</td>
+                      <td>
+                        <button className="btn ghost" style={{ padding: "2px 8px" }}
+                          onClick={() => setExpanded(isOpen ? null : p.id)}>
+                          {isOpen ? "▾" : "▸"} {p.versions?.length || 0} version
+                        </button>
+                      </td>
+                      <td>{p.available_licenses}</td>
+                      {isAdmin && (
+                        <td>
+                          <div className="row" style={{ gap: 6 }}>
+                            <button className="btn ghost" style={{ padding: "4px 10px" }} onClick={() => setEditPkg(p)}>Sửa</button>
+                            <button className="btn ghost danger" style={{ padding: "4px 10px" }} onClick={() => removePkg(p)}>Xóa</button>
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                    {isOpen && (
+                      <tr>
+                        <td colSpan={isAdmin ? 5 : 4} style={{ background: "rgba(0,0,0,0.15)" }}>
+                          <VersionList
+                            pkg={p}
+                            isAdmin={isAdmin}
+                            onEdit={setEditVer}
+                            onDelete={(v) => removeVersion(p, v)}
+                            onApprove={approveVersion}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+              {shownPackages.length === 0 && (
+                <tr><td colSpan={isAdmin ? 5 : 4} className="muted">Chưa có package.</td></tr>
+              )}
+            </tbody>
+          </table>
+          {showHistory && isAdmin && <DownloadHistory />}
+        </div>
+      </div>
       {showUpload && (
         <UploadModal
           packages={packages}
@@ -151,8 +217,23 @@ export default function Packages() {
       {editPkg && (
         <PackageModal
           pkg={editPkg}
+          folders={folders}
           onClose={() => setEditPkg(null)}
           onDone={() => { setEditPkg(null); setMsg("Đã lưu package."); load(); }}
+        />
+      )}
+      {folderModal && (
+        <FolderModal
+          mode={folderModal.mode}
+          folder={folderModal.folder}
+          parentId={folderModal.parentId}
+          folders={folders}
+          onClose={() => setFolderModal(null)}
+          onDone={() => {
+            setFolderModal(null);
+            setMsg(folderModal.mode === "rename" ? "Đã lưu thư mục." : "Đã tạo thư mục.");
+            loadFolders();
+          }}
         />
       )}
       {editVer && (
@@ -260,6 +341,97 @@ function FetchModal({ packages, onClose, onDone }) {
   );
 }
 
+// Một nhánh của cây Package Library (mirror PDQ: Package Library > Packages > Custom
+// Packages > Remove Updates...). Đệ quy qua children (parent adjacency-list).
+function FolderNode({ folder, depth, childrenOf, expanded, toggleExpand, selectedFolder, onSelect, isAdmin, onRename, onDelete }) {
+  const kids = childrenOf(folder.id);
+  const isOpen = expanded.has(folder.id);
+  const isSelected = selectedFolder === folder.id;
+  return (
+    <div>
+      <div className={`tree-node${isSelected ? " active" : ""}`} style={{ paddingLeft: depth * 16 }}>
+        {kids.length > 0 ? (
+          <button className="tree-toggle" onClick={() => toggleExpand(folder.id)}>
+            <Icon name={isOpen ? "chevronDown" : "chevronRight"} size={13} />
+          </button>
+        ) : <span className="tree-toggle-spacer" />}
+        <span className="tree-label" onClick={() => onSelect(folder.id)}>
+          <Icon name={isOpen ? "folderOpen" : "folder"} size={15} /> {folder.name}
+        </span>
+        {isAdmin && (
+          <div className="tree-actions">
+            <button className="tree-action" title="Đổi tên" onClick={() => onRename(folder)}>✎</button>
+            <button className="tree-action" title="Xóa" onClick={() => onDelete(folder)}>✕</button>
+          </div>
+        )}
+      </div>
+      {isOpen && kids.map((k) => (
+        <FolderNode
+          key={k.id}
+          folder={k}
+          depth={depth + 1}
+          childrenOf={childrenOf}
+          expanded={expanded}
+          toggleExpand={toggleExpand}
+          selectedFolder={selectedFolder}
+          onSelect={onSelect}
+          isAdmin={isAdmin}
+          onRename={onRename}
+          onDelete={onDelete}
+        />
+      ))}
+    </div>
+  );
+}
+
+// Tạo/đổi tên thư mục — chọn thư mục cha qua <select> (không kéo-thả, đơn giản & đủ dùng).
+function FolderModal({ mode, folder, parentId, folders, onClose, onDone }) {
+  const [name, setName] = useState(folder?.name || "");
+  const [parent, setParent] = useState(folder?.parent ?? parentId ?? "");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setErr(""); setBusy(true);
+    try {
+      const payload = { name, parent: parent || null };
+      if (mode === "rename") {
+        await api.patch(`/package-folders/${folder.id}/`, payload);
+      } else {
+        await api.post("/package-folders/", payload);
+      }
+      onDone();
+    } catch (e2) {
+      setErr(e2.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
+        <h3>{mode === "rename" ? "Đổi tên thư mục" : "Thư mục mới"}</h3>
+        <label>Tên</label>
+        <input value={name} onChange={(e) => setName(e.target.value)} required />
+        <label>Thư mục cha (để trống = gốc)</label>
+        <select value={parent || ""} onChange={(e) => setParent(e.target.value)}>
+          <option value="">— Gốc —</option>
+          {folders.filter((f) => f.id !== folder?.id).map((f) => (
+            <option key={f.id} value={f.id}>{f.name}</option>
+          ))}
+        </select>
+        {err && <p className="error mt">{err}</p>}
+        <div className="row spread mt">
+          <button type="button" className="btn ghost" onClick={onClose}>Hủy</button>
+          <button className="btn" disabled={busy}>{busy ? "Đang lưu…" : "Lưu"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 // Download History — nhật ký các lần tải từ URL (mirror tab "Download History" của PDQ).
 function DownloadHistory() {
   const [rows, setRows] = useState([]);
@@ -305,11 +477,12 @@ function DownloadHistory() {
   );
 }
 
-function PackageModal({ pkg, onClose, onDone }) {
+function PackageModal({ pkg, folders, onClose, onDone }) {
   const [form, setForm] = useState({
     name: pkg.name || "",
     vendor: pkg.vendor || "",
     description: pkg.description || "",
+    folder: pkg.folder ?? "",
     min_os: pkg.min_os || "",
     min_ram_gb: pkg.min_ram_gb ?? 0,
     min_disk_gb: pkg.min_disk_gb ?? 0,
@@ -332,6 +505,7 @@ function PackageModal({ pkg, onClose, onDone }) {
         name: form.name,
         vendor: form.vendor,
         description: form.description,
+        folder: form.folder || null,
         min_os: form.min_os,
         min_ram_gb: Number(form.min_ram_gb) || 0,
         min_disk_gb: Number(form.min_disk_gb) || 0,
@@ -359,6 +533,11 @@ function PackageModal({ pkg, onClose, onDone }) {
         <input value={form.vendor} onChange={set("vendor")} placeholder="Microsoft, Mozilla…" />
         <label>Mô tả</label>
         <textarea value={form.description} onChange={set("description")} rows={2} />
+        <label>Thư mục (Package Library)</label>
+        <select value={form.folder} onChange={set("folder")}>
+          <option value="">— Không thuộc thư mục nào —</option>
+          {folders.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+        </select>
         <label>Yêu cầu OS tối thiểu</label>
         <input value={form.min_os} onChange={set("min_os")} placeholder="Windows 10 21H2" />
         <div className="row" style={{ gap: 12 }}>

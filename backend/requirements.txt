@@ -11,6 +11,14 @@ redis==5.2.1
 django-celery-results==2.5.1
 django-celery-beat==2.7.0
 
+# --- Real-time (WebSocket) ---
+channels==4.3.2
+channels-redis==4.3.0
+# ASGI server: uvicorn (không phải daphne) vì daphne ghim cứng twisted[tls]->pyopenssl>=25.2.0,
+# xung đột với impacket 0.12.0 ghim pyOpenSSL==24.0.0 (xem ghi chú cryptography==42.0.8 bên dưới).
+uvicorn==0.50.0
+websockets==16.0
+
 # --- Deployment engine (agentless push) ---
 impacket==0.12.0
 
@@ -20,6 +28,3 @@ ldap3==2.9.1
 # --- Credential vault (encryption at-rest) ---
 # Bị chặn <43 bởi impacket 0.12.0 (ghim pyOpenSSL==24.0.0 -> cryptography<43).
 cryptography==42.0.8
-
-# --- Server ---
-gunicorn==23.0.0

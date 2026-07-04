@@ -93,7 +93,9 @@ python -m venv .venv && .venv\Scripts\activate      # Windows
 pip install -r requirements.txt
 set DJANGO_SETTINGS_MODULE=ryandeploy.settings.dev     # cần Postgres + Redis đang chạy
 python manage.py migrate
-python manage.py runserver
+uvicorn ryandeploy.asgi:application --reload            # KHÔNG dùng "manage.py runserver" —
+                                                          # đó là WSGI thuần, không phục vụ được
+                                                          # WebSocket real-time (/ws/updates/)
 celery -A ryandeploy worker -l info                     # terminal khác
 ```
 
