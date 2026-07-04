@@ -79,6 +79,12 @@ a { color: var(--accent); text-decoration: none; }
 .page-head { margin-bottom: 20px; }
 .page-head h2 { margin: 0 0 2px; }
 .page-head p { margin: 0; font-size: 14px; }
+.page-head-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+
+.server-mini { display: flex; gap: 14px; padding: 7px 12px; background: var(--panel2); border-radius: 8px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.server-mini-item { display: inline-flex; align-items: center; gap: 6px; }
+.server-mini .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.server-mini strong { color: var(--text); font-weight: 600; }
 
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 16px; }
 .card {
@@ -252,8 +258,6 @@ label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px
 .legend .swatch { width: 11px; height: 11px; border-radius: 3px; flex: none; }
 .legend .legend-label { color: var(--text); }
 .legend .legend-value { color: var(--muted); font-weight: 600; margin-left: auto; padding-left: 10px; }
-.gauge { flex-direction: column; gap: 6px; }
-.gauge-sub { font-size: 13px; }
 .chart-wide { width: 100%; overflow-x: auto; }
 .timeline-svg { width: 100%; min-width: 476px; height: 160px; display: block; }
 .bar-label { font-size: 10px; fill: var(--muted); }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import Icon from "../components/Icon";
-import { Donut, Gauge, TimelineBars } from "../components/Charts";
+import { Donut, TimelineBars, usageColor } from "../components/Charts";
 
 const SERVER_STATS_INTERVAL_MS = 3000;
 
@@ -43,6 +43,29 @@ function toDonutData(slices, counts) {
   return slices.map((s) => ({ ...s, value: counts?.[s.key] ?? 0 }));
 }
 
+const SERVER_MINI = [
+  { key: "cpu_percent", label: "CPU" },
+  { key: "ram_percent", label: "RAM" },
+  { key: "disk_percent", label: "Disk" },
+];
+
+// Chỉ báo CPU/RAM/Disk gọn (chấm màu theo ngưỡng + %) — đủ để liếc nhanh, không chiếm chỗ.
+function ServerMini({ stats }) {
+  return (
+    <div className="server-mini" title="CPU / RAM / Ổ đĩa máy chủ (real-time)">
+      {SERVER_MINI.map((m) => {
+        const pct = stats?.[m.key];
+        return (
+          <span className="server-mini-item" key={m.key}>
+            <span className="dot" style={{ background: usageColor(pct ?? 0) }} />
+            {m.label} <strong>{pct != null ? `${Math.round(pct)}%` : "—"}</strong>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
   const [report, setReport] = useState(null);
@@ -71,9 +94,12 @@ export default function Dashboard() {
 
   return (
     <div>
-      <div className="page-head">
-        <h2>Dashboard</h2>
-        <p className="muted">Tổng quan hệ thống triển khai</p>
+      <div className="page-head page-head-row">
+        <div>
+          <h2>Dashboard</h2>
+          <p className="muted">Tổng quan hệ thống triển khai</p>
+        </div>
+        <ServerMini stats={serverStats} />
       </div>
       {err && <p className="error">{err}</p>}
       <div className="cards">
@@ -88,45 +114,6 @@ export default function Dashboard() {
             </div>
           </div>
         ))}
-      </div>
-
-      <div className="page-head mt-lg">
-        <h3>Tài nguyên máy chủ</h3>
-        <p className="muted">CPU / RAM / Ổ đĩa thời gian thực của máy server</p>
-      </div>
-      <div className="chart-grid">
-        <div className="card">
-          <div className="chart-title">CPU</div>
-          <Gauge
-            value={serverStats?.cpu_percent}
-            label="CPU"
-            sub={serverStats ? `${serverStats.cpu_count} lõi` : "Đang tải…"}
-          />
-        </div>
-        <div className="card">
-          <div className="chart-title">RAM</div>
-          <Gauge
-            value={serverStats?.ram_percent}
-            label="RAM"
-            sub={
-              serverStats
-                ? `${serverStats.ram_used_gb} / ${serverStats.ram_total_gb} GB`
-                : "Đang tải…"
-            }
-          />
-        </div>
-        <div className="card">
-          <div className="chart-title">Ổ đĩa</div>
-          <Gauge
-            value={serverStats?.disk_percent}
-            label="Disk"
-            sub={
-              serverStats
-                ? `${serverStats.disk_used_gb} / ${serverStats.disk_total_gb} GB`
-                : "Đang tải…"
-            }
-          />
-        </div>
       </div>
 
       <div className="page-head mt-lg">

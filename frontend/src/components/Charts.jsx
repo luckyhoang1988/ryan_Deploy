@@ -67,55 +67,11 @@ export function Donut({ data, size = 168, thickness = 22 }) {
   );
 }
 
-// Màu theo ngưỡng sử dụng (status: an toàn/cảnh báo/nguy hiểm) — dùng cho Gauge.
-function usageColor(pct) {
+// Màu theo ngưỡng sử dụng (status: an toàn/cảnh báo/nguy hiểm) — dùng cho chỉ số CPU/RAM/Disk.
+export function usageColor(pct) {
   if (pct >= 90) return "var(--red)";
   if (pct >= 70) return "var(--amber)";
   return "var(--green)";
-}
-
-// Gauge tròn 1 giá trị (0-100%), dùng cho chỉ số real-time như CPU/RAM.
-export function Gauge({ value, label, sub, size = 150, thickness = 16 }) {
-  const pct = Math.max(0, Math.min(100, value ?? 0));
-  const r = (size - thickness) / 2;
-  const cx = size / 2;
-  const color = usageColor(pct);
-
-  return (
-    <div className="chart gauge">
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img">
-        <circle
-          cx={cx}
-          cy={cx}
-          r={r}
-          fill="none"
-          strokeWidth={thickness}
-          style={{ stroke: "var(--panel2)" }}
-        />
-        <circle
-          cx={cx}
-          cy={cx}
-          r={r}
-          fill="none"
-          strokeWidth={thickness}
-          strokeLinecap="round"
-          pathLength={100}
-          strokeDasharray={`${pct} ${100 - pct}`}
-          style={{ stroke: color }}
-          transform={`rotate(-90 ${cx} ${cx})`}
-        >
-          <title>{`${label}: ${pct.toFixed(0)}%`}</title>
-        </circle>
-        <text x={cx} y={cx - 2} textAnchor="middle" className="donut-total">
-          {pct.toFixed(0)}%
-        </text>
-        <text x={cx} y={cx + 18} textAnchor="middle" className="donut-sub">
-          {label}
-        </text>
-      </svg>
-      {sub && <div className="gauge-sub muted">{sub}</div>}
-    </div>
-  );
 }
 
 // Cột chồng theo ngày: data = [{ date, success, failed }] (14 phần tử).
