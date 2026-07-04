@@ -2,7 +2,7 @@ from django.conf import settings
 from rest_framework import serializers
 
 from . import repository
-from .models import InstallerType, Package, PackageVersion
+from .models import InstallerType, Package, PackageDownload, PackageVersion
 
 
 class PackageVersionSerializer(serializers.ModelSerializer):
@@ -37,9 +37,13 @@ class PackageVersionSerializer(serializers.ModelSerializer):
             "sha256",
             "file_size",
             "success_exit_codes",
+            "source",
+            "download_url",
+            "approved",
+            "approved_at",
             "created_at",
         ]
-        read_only_fields = ["sha256", "file_size", "created_at"]
+        read_only_fields = ["sha256", "file_size", "source", "approved", "approved_at", "created_at"]
 
     def create(self, validated_data):
         upload = validated_data.get("installer_file")
@@ -85,6 +89,11 @@ class PackageVersionSerializer(serializers.ModelSerializer):
 class PackageSerializer(serializers.ModelSerializer):
     available_licenses = serializers.IntegerField(read_only=True)
     versions = PackageVersionSerializer(many=True, read_only=True)
+    latest_version = serializers.SerializerMethodField()
+
+    def get_latest_version(self, obj):
+        latest = obj.latest_version
+        return {"id": latest.id, "version": latest.version} if latest else None
 
     class Meta:
         model = Package
@@ -99,6 +108,33 @@ class PackageSerializer(serializers.ModelSerializer):
             "total_licenses",
             "used_licenses",
             "available_licenses",
+            "download_url",
+            "auto_download",
+            "auto_approve_after_days",
+            "inventory_name",
+            "latest_version",
             "versions",
+            "created_at",
+        ]
+
+
+class PackageDownloadSerializer(serializers.ModelSerializer):
+    package_name = serializers.CharField(source="package.name", read_only=True)
+    requested_by_name = serializers.CharField(source="requested_by.username", read_only=True)
+
+    class Meta:
+        model = PackageDownload
+        fields = [
+            "id",
+            "package",
+            "package_name",
+            "url",
+            "version_str",
+            "status",
+            "package_version",
+            "sha256",
+            "file_size",
+            "error",
+            "requested_by_name",
             "created_at",
         ]

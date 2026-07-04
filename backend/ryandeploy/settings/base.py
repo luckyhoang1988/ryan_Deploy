@@ -170,6 +170,9 @@ RYANDEPLOY = {
     # Trần kích thước file installer được upload (MB) — chặn làm đầy đĩa. Django stream
     # file lớn ra temp disk (không nạp hết RAM) nên đây là giới hạn dung lượng, không phải RAM.
     "MAX_INSTALLER_MB": env_int("RYANDEPLOY_MAX_INSTALLER_MB", 2048),
+    # --- Catalog / Auto Download ---
+    # Timeout (giây) khi tải installer từ URL ngoài (downloader.py).
+    "DOWNLOAD_TIMEOUT": env_int("RYANDEPLOY_DOWNLOAD_TIMEOUT", 300),
 }
 
 # Chặn body form phi-file quá lớn (không áp cho file upload — file đã có trần riêng ở
@@ -204,6 +207,14 @@ CELERY_BEAT_SCHEDULE = {
     "reconcile-stuck-deployments": {
         "task": "apps.deployments.tasks.reconcile_stuck_deployments",
         "schedule": 300.0,  # mỗi 5 phút: gỡ deployment kẹt RUNNING nếu chord callback không chạy
+    },
+    "packages-auto-download": {
+        "task": "apps.packages.tasks.auto_download_check",
+        "schedule": crontab(hour=3, minute=0),  # 03:00: tải bản mới nhất cho package auto
+    },
+    "packages-auto-approve": {
+        "task": "apps.packages.tasks.auto_approve_pending",
+        "schedule": crontab(hour=3, minute=30),  # 03:30: tự duyệt version đã qua cửa sổ chờ
     },
 }
 

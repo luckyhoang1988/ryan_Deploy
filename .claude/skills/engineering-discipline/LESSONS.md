@@ -14,6 +14,31 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-04 — Catalog/Update-tracking: test API dưới Celery-eager phải mock task nền
+**Bối cảnh:** Thêm Package Catalog (tải installer từ URL) + tab "Updates" (dò máy lỗi thời
+qua InstalledSoftware). Viết test cho endpoint `POST /packages/<id>/fetch/` và
+`POST /updates/<id>/deploy/`.
+**Bài học:**
+1. **CELERY_TASK_ALWAYS_EAGER=True (settings.test) khiến `.delay()`/chord chạy ĐỒNG BỘ ngay
+   trong request.** Test endpoint `fetch` sẽ gọi `downloader.fetch` thật (tải mạng qua
+   urllib), và endpoint `updates deploy` gọi `launch_deployment` → chord `deploy_to_machine`
+   → đẩy SMB thật. Phải monkeypatch `apps.packages.downloader.fetch` và
+   `apps.deployments.orchestrator.launch_deployment` trong test, nếu không test treo/lỗi mạng.
+2. **View import task/orchestrator BÊN TRONG hàm** (`from .tasks import ...` / `from
+   apps.deployments.orchestrator import launch_deployment` trong action) → monkeypatch trên
+   MODULE NGUỒN có hiệu lực vì tên được bind lúc gọi, không phải lúc import view. Đây là seam
+   sạch để test mà không cần patch chính view.
+3. **"Latest version" không parse version vendor** — dùng version đã `approved` mới nhất theo
+   `-created_at` (newest = latest). So máy lỗi thời bằng `packaging.version` (đã có trong
+   venv), fallback so chuỗi khác nhau. Máy có nhiều bản ghi khớp (Chrome vs "Chrome Helper"):
+   chọn đại diện tên NGẮN nhất, và nếu bất kỳ dòng nào == latest thì coi máy đã cập nhật.
+4. **Downloader dùng urllib stdlib** (không `requests` — tránh đụng pin cryptography==42 của
+   impacket): stream ra file tạm + đếm byte để chặn trần dung lượng giữa chừng; validate
+   scheme http/https trước (chống SSRF file://); dedup theo SHA-256 để tải lại không tạo trùng.
+**Áp dụng:** Mọi endpoint kích hoạt task nền mà test dưới eager → mock ở tầng downloader/
+orchestrator, đừng để task chạm mạng/SMB. Feature "so version fleet" → compare ở Python với
+packaging.version, không SQL; heuristic latest = newest-approved, không parse chuỗi vendor.
+
 ## 2026-07-04 — Biểu đồ SVG thuần: pathLength=100 + biến CSS phải qua style, không qua attribute
 **Bối cảnh:** Dựng donut/bar báo cáo dashboard bằng SVG nội tuyến (không thêm thư viện chart).
 **Bài học:**

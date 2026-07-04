@@ -12,6 +12,19 @@ class InstallerType(models.TextChoices):
     MSIX = "msix", "MSIX/AppX (.msix/.appx)"
 
 
+class AutoDownloadPolicy(models.TextChoices):
+    """Chính sách tự tải & duyệt version mới từ download_url (mirror PDQ Auto Download)."""
+
+    MANUAL = "manual", "Thủ công (admin duyệt)"
+    IMMEDIATE = "immediate", "Duyệt ngay khi tải"
+    AUTOMATIC = "automatic", "Tự duyệt sau N ngày"
+
+
+class VersionSource(models.TextChoices):
+    UPLOAD = "upload", "Upload thủ công"
+    URL = "url", "Tải từ URL"
+
+
 def installer_upload_path(instance, filename):
     """Đường lưu file trong repository: repository/<package_slug>/<version>/<filename>."""
     pkg = instance.package
@@ -34,6 +47,22 @@ class Package(TimeStampedModel):
     total_licenses = models.PositiveIntegerField(default=0)
     used_licenses = models.PositiveIntegerField(default=0)
 
+    # --- Catalog / Auto Download (lấy cảm hứng PDQ Deploy) ---
+    # Nguồn evergreen: URL luôn trả bản mới nhất của phần mềm (vd link vendor). Để trống =
+    # không tự tải, chỉ upload thủ công.
+    download_url = models.URLField(blank=True, max_length=1024)
+    auto_download = models.CharField(
+        max_length=16, choices=AutoDownloadPolicy.choices, default=AutoDownloadPolicy.MANUAL
+    )
+    # Số ngày chờ trước khi tự duyệt version tải về (chỉ dùng khi auto_download=automatic).
+    auto_approve_after_days = models.PositiveIntegerField(default=7)
+    # Chuỗi con DisplayName để khớp InstalledSoftware khi dò cập nhật. Trống = suy từ
+    # verify_name của version mới nhất, rồi tới name.
+    inventory_name = models.CharField(
+        max_length=255, blank=True,
+        help_text="Tên phần mềm trong registry để dò máy lỗi thời (vd 'Google Chrome').",
+    )
+
     class Meta:
         ordering = ["name"]
 
@@ -43,6 +72,21 @@ class Package(TimeStampedModel):
     @property
     def available_licenses(self):
         return max(self.total_licenses - self.used_licenses, 0)
+
+    @property
+    def latest_version(self):
+        """Version mới nhất đã DUYỆT (versions ordering -created_at). None nếu chưa có."""
+        return self.versions.filter(approved=True).first()
+
+    @property
+    def match_name(self) -> str:
+        """Chuỗi khớp InstalledSoftware: inventory_name > verify_name của latest > name."""
+        if self.inventory_name:
+            return self.inventory_name
+        latest = self.latest_version
+        if latest and latest.verify_name:
+            return latest.verify_name
+        return self.name
 
 
 class PackageVersion(TimeStampedModel):
@@ -77,6 +121,18 @@ class PackageVersion(TimeStampedModel):
     # Mã exit code coi là thành công (0 và 3010 = cần reboot mặc định)
     success_exit_codes = models.JSONField(default=list, blank=True)
 
+    # --- Catalog provenance & duyệt (lấy cảm hứng PDQ Deploy) ---
+    # Nguồn gốc version: upload thủ công hay tải từ URL. URL đã tải (cho Download History).
+    source = models.CharField(
+        max_length=8, choices=VersionSource.choices, default=VersionSource.UPLOAD
+    )
+    download_url = models.URLField(blank=True, max_length=1024)
+    # approved=True mới được coi là "latest" cho dò cập nhật & deploy 1 chạm. Mặc định True
+    # để version upload thủ công (và dữ liệu cũ khi migrate) dùng được ngay; version tải tự
+    # động sẽ được duyệt theo policy của Package.
+    approved = models.BooleanField(default=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
     )
@@ -87,3 +143,36 @@ class PackageVersion(TimeStampedModel):
 
     def __str__(self):
         return f"{self.package.name} {self.version}"
+
+
+class PackageDownload(TimeStampedModel):
+    """Nhật ký một lần tải installer từ URL (Download History kiểu PDQ Deploy)."""
+
+    class Status(models.TextChoices):
+        DOWNLOADING = "downloading", "Đang tải"
+        SUCCESS = "success", "Thành công"
+        UNCHANGED = "unchanged", "Không đổi (đã có)"
+        FAILED = "failed", "Thất bại"
+
+    package = models.ForeignKey(Package, on_delete=models.CASCADE, related_name="downloads")
+    url = models.URLField(max_length=1024)
+    version_str = models.CharField(max_length=64, blank=True)
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.DOWNLOADING, db_index=True
+    )
+    # Version tạo ra khi thành công; SET_NULL để giữ lịch sử cả khi version bị xóa sau này.
+    package_version = models.ForeignKey(
+        PackageVersion, null=True, blank=True, on_delete=models.SET_NULL, related_name="downloads"
+    )
+    sha256 = models.CharField(max_length=64, blank=True)
+    file_size = models.BigIntegerField(default=0)
+    error = models.TextField(blank=True)
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.package.name} ← {self.url} [{self.status}]"

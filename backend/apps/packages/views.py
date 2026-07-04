@@ -1,13 +1,23 @@
 from django.db.models import ProtectedError
-from rest_framework import viewsets
+from django.utils import timezone
+from rest_framework import status, viewsets
+from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from apps.audit.models import AuditLog
-from apps.core.permissions import IsAdmin
+from apps.core.permissions import IsAdmin, IsOperatorOrAbove
 
-from .models import Package, PackageVersion
-from .serializers import PackageSerializer, PackageVersionSerializer
+from . import updates as updates_svc
+from .models import Package, PackageDownload, PackageVersion
+from .serializers import (
+    PackageDownloadSerializer,
+    PackageSerializer,
+    PackageVersionSerializer,
+)
 
 
 class PackageViewSet(viewsets.ModelViewSet):
@@ -23,6 +33,34 @@ class PackageViewSet(viewsets.ModelViewSet):
             user=self.request.user,
             target=package,
             package=package.name,
+        )
+
+    @action(detail=True, methods=["post"])
+    def fetch(self, request, pk=None):
+        """
+        Tải một version từ URL về repository (bất đồng bộ qua Celery).
+        Body: {url?: str (mặc định package.download_url), version: str}.
+        """
+        package = self.get_object()
+        url = (request.data.get("url") or package.download_url or "").strip()
+        version = (request.data.get("version") or "").strip()
+        if not url:
+            return Response(
+                {"detail": "Chưa có URL tải (nhập url hoặc đặt download_url cho package)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not version:
+            return Response(
+                {"detail": "Cần nhập nhãn version cho bản tải về."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from .tasks import fetch_package_version
+
+        task = fetch_package_version.delay(package.id, url, version, request.user.id)
+        return Response(
+            {"detail": "Đang tải trong nền.", "task_id": task.id},
+            status=status.HTTP_202_ACCEPTED,
         )
 
     def perform_destroy(self, instance):
@@ -69,6 +107,23 @@ class PackageVersionViewSet(viewsets.ModelViewSet):
             sha256=version.sha256,
         )
 
+    @action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+        """Duyệt một version (mới được coi là 'latest' cho dò cập nhật & deploy)."""
+        version = self.get_object()
+        if not version.approved:
+            version.approved = True
+            version.approved_at = timezone.now()
+            version.save(update_fields=["approved", "approved_at", "updated_at"])
+            AuditLog.record(
+                AuditLog.Action.PACKAGE_APPROVE,
+                user=request.user,
+                target=version,
+                package=version.package.name,
+                version=version.version,
+            )
+        return Response(PackageVersionSerializer(version).data)
+
     def perform_destroy(self, instance):
         installer_file = instance.installer_file
         pkg_name = instance.package.name
@@ -91,4 +146,100 @@ class PackageVersionViewSet(viewsets.ModelViewSet):
             target=instance,
             package=pkg_name,
             version=ver,
+        )
+
+
+class PackageDownloadViewSet(viewsets.ReadOnlyModelViewSet):
+    """Download History — chỉ đọc, chỉ admin (có thể lộ URL nội bộ)."""
+
+    queryset = PackageDownload.objects.select_related("package", "requested_by").all()
+    serializer_class = PackageDownloadSerializer
+    permission_classes = [IsAdmin]
+
+
+class UpdatesView(APIView):
+    """GET /api/updates/ — danh sách package có máy lỗi thời (bản '133 Updates' của RyanDeploy)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        items = updates_svc.compute_updates()
+        return Response({"count": len(items), "results": items})
+
+
+class UpdateDeployView(APIView):
+    """
+    POST /api/updates/<package_id>/deploy/ — tạo & kích hoạt deployment cập nhật cho các
+    máy lỗi thời của package. Body: {credential: id, name?: str}.
+    """
+
+    permission_classes = [IsOperatorOrAbove]
+
+    def post(self, request, package_id=None):
+        from apps.credentials.models import DeployCredential
+        from apps.deployments.models import Deployment, DeploymentAction
+        from apps.deployments.orchestrator import launch_deployment
+
+        package = Package.objects.filter(pk=package_id).first()
+        if not package:
+            return Response({"detail": "Package không tồn tại."}, status=status.HTTP_404_NOT_FOUND)
+
+        latest = package.latest_version
+        if latest is None:
+            return Response(
+                {"detail": "Package chưa có version đã duyệt."}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        credential_id = request.data.get("credential")
+        credential = DeployCredential.objects.filter(pk=credential_id).first()
+        if credential is None:
+            return Response(
+                {"detail": "Cần chọn credential hợp lệ."}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        machine_ids = updates_svc.outdated_machine_ids(package)
+        if not machine_ids:
+            return Response(
+                {"detail": "Không có máy nào lỗi thời."}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        name = (request.data.get("name") or "").strip() or (
+            f"Cập nhật {package.name} → {latest.version}"
+        )
+        deployment = Deployment.objects.create(
+            name=name,
+            action=DeploymentAction.INSTALL,
+            package_version=latest,
+            credential=credential,
+            created_by=request.user,
+        )
+        deployment.target_machines.set(machine_ids)
+
+        AuditLog.record(
+            AuditLog.Action.UPDATE_DEPLOY,
+            user=request.user,
+            target=deployment,
+            package=package.name,
+            version=latest.version,
+            machines=len(machine_ids),
+        )
+
+        try:
+            job_count = launch_deployment(deployment)
+        except Exception:
+            deployment.status = "failed"
+            deployment.finished_at = timezone.now()
+            deployment.save(update_fields=["status", "finished_at"])
+            return Response(
+                {"detail": "Không kích hoạt được deployment (lỗi hệ thống)."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(
+            {
+                "detail": "Đã tạo & kích hoạt deployment cập nhật.",
+                "deployment_id": deployment.id,
+                "jobs": job_count,
+            },
+            status=status.HTTP_202_ACCEPTED,
         )

@@ -7,6 +7,7 @@ import Packages from "./pages/Packages";
 import Machines from "./pages/Machines";
 import Deployments from "./pages/Deployments";
 import DeploymentDetail from "./pages/DeploymentDetail";
+import Updates from "./pages/Updates";
 import Credentials from "./pages/Credentials";
 import Users from "./pages/Users";
 
@@ -24,6 +25,7 @@ export default function App() {
         <Route path="/machines" element={<Machines />} />
         <Route path="/deployments" element={<Deployments />} />
         <Route path="/deployments/:id" element={<DeploymentDetail />} />
+        <Route path="/updates" element={<Updates />} />
         <Route path="/credentials" element={<Credentials />} />
         <Route path="/users" element={<Users />} />
         <Route path="*" element={<Navigate to="/" />} />
