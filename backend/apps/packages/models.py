@@ -1,7 +1,14 @@
 from django.conf import settings
 from django.db import models
+from django.utils.functional import cached_property
 
 from apps.core.models import TimeStampedModel
+
+# to_attr dùng chung khi cần prefetch "bản mới nhất đã duyệt" cho nhiều Package cùng lúc
+# (list view / compute_updates) — tránh N+1 do latest_version tự query mỗi package.
+# Dùng: Prefetch("versions", queryset=PackageVersion.objects.filter(approved=True)
+#                 .order_by("-created_at"), to_attr=APPROVED_VERSIONS_ATTR)
+APPROVED_VERSIONS_ATTR = "_approved_versions_prefetched"
 
 
 class InstallerType(models.TextChoices):
@@ -73,9 +80,18 @@ class Package(TimeStampedModel):
     def available_licenses(self):
         return max(self.total_licenses - self.used_licenses, 0)
 
-    @property
+    @cached_property
     def latest_version(self):
-        """Version mới nhất đã DUYỆT (versions ordering -created_at). None nếu chưa có."""
+        """
+        Version mới nhất đã DUYỆT. None nếu chưa có.
+
+        cached_property: tránh query lặp lại trên CÙNG instance (vd match_name gọi lại).
+        Nếu queryset đã prefetch qua APPROVED_VERSIONS_ATTR (xem module docstring), dùng
+        luôn kết quả đó thay vì query mới — tránh N+1 khi liệt kê nhiều Package.
+        """
+        prefetched = getattr(self, APPROVED_VERSIONS_ATTR, None)
+        if prefetched is not None:
+            return prefetched[0] if prefetched else None
         return self.versions.filter(approved=True).first()
 
     @property

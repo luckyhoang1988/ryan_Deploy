@@ -1,4 +1,4 @@
-from django.db.models import ProtectedError
+from django.db.models import Prefetch, ProtectedError
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -12,7 +12,7 @@ from apps.audit.models import AuditLog
 from apps.core.permissions import IsAdmin, IsOperatorOrAbove
 
 from . import updates as updates_svc
-from .models import Package, PackageDownload, PackageVersion
+from .models import APPROVED_VERSIONS_ATTR, Package, PackageDownload, PackageVersion
 from .serializers import (
     PackageDownloadSerializer,
     PackageSerializer,
@@ -21,7 +21,16 @@ from .serializers import (
 
 
 class PackageViewSet(viewsets.ModelViewSet):
-    queryset = Package.objects.all()
+    # prefetch_related("versions") cho field lồng `versions` trong serializer; Prefetch
+    # riêng (to_attr) cho `latest_version` để tránh mỗi package tự query lại (N+1 khi list).
+    queryset = Package.objects.prefetch_related(
+        "versions",
+        Prefetch(
+            "versions",
+            queryset=PackageVersion.objects.filter(approved=True).order_by("-created_at"),
+            to_attr=APPROVED_VERSIONS_ATTR,
+        ),
+    )
     serializer_class = PackageSerializer
     # Tier-0: chỉ admin được tạo/sửa/xóa package (đọc vẫn cho mọi user auth).
     permission_classes = [IsAdmin]

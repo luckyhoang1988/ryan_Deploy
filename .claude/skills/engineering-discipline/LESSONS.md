@@ -14,6 +14,29 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-04 — Package catalog: property lọc (`.filter().first()`) không ăn cache của prefetch_related thường
+**Bối cảnh:** Review toàn bộ backend so với PDQ Deploy để tìm bug/tối ưu. `Package.latest_version`
+là `@property` gọi `self.versions.filter(approved=True).first()`. `updates.compute_updates()` và
+`PackageViewSet` đều gọi `prefetch_related("versions")` tưởng đã tránh N+1, nhưng KHÔNG — vì
+`.filter()` luôn phát sinh query mới, bỏ qua cache prefetch (cache chỉ dùng được cho `.all()`
+không lọc thêm). Tệ hơn: `match_name` gọi lại `self.latest_version` lần 2 trên CÙNG instance →
+double query mỗi package. Đo thực tế bằng `CaptureQueriesContext`: `compute_updates()` với 20
+package tốn ~62 query trước fix, 22 sau fix; `GET /api/packages/` còn 6 query cố định (trước đó
+tỉ lệ thuận số package).
+**Bài học:** 2 lớp fix riêng biệt cần cả hai mới hết N+1:
+1. Đổi `@property` → `@cached_property` để tránh gọi lại query trên CÙNG instance (vd property A
+   gọi property B cùng nguồn dữ liệu).
+2. Dùng `Prefetch(rel, queryset=..., to_attr="_cache_attr")` riêng (không phải `prefetch_related("rel")`
+   trơn) rồi trong property check `getattr(self, "_cache_attr", None)` trước khi query — đây là
+   cách DUY NHẤT để property có điều kiện lọc (`.filter()...first()`) ăn được cache prefetch khi
+   liệt kê nhiều instance. Có thể dùng CÙNG lúc 2 Prefetch khác `to_attr` cho cùng 1 relation
+   (vd "versions" đầy đủ cho serializer + "_approved_versions_prefetched" đã lọc cho property).
+**Áp dụng:** Bất kỳ property nào gọi `related_manager.filter(...).first()/.exists()` (không phải
+`.all()`) mà được dùng trong list/loop nhiều instance → không tin `prefetch_related("rel")` trơn
+là đủ; phải verify bằng `CaptureQueriesContext` thực tế, và nếu cần cache thì bắt buộc `Prefetch(to_attr=...)`
++ property tự đọc `getattr`. `cached_property` giải quyết double-query trong CÙNG instance nhưng
+không giải quyết N+1 giữa các instance — cần cả hai.
+
 ## 2026-07-04 — Catalog/Update-tracking: test API dưới Celery-eager phải mock task nền
 **Bối cảnh:** Thêm Package Catalog (tải installer từ URL) + tab "Updates" (dò máy lỗi thời
 qua InstalledSoftware). Viết test cho endpoint `POST /packages/<id>/fetch/` và

@@ -104,10 +104,19 @@ def _updates_for_package(pkg) -> dict | None:
 
 def compute_updates() -> list[dict]:
     """Danh sách package có ít nhất 1 máy lỗi thời (sắp theo số máy giảm dần)."""
-    from .models import Package
+    from django.db.models import Prefetch
 
+    from .models import APPROVED_VERSIONS_ATTR, Package, PackageVersion
+
+    # Prefetch riêng bản đã duyệt mới nhất mỗi package (to_attr) → latest_version/match_name
+    # dùng cache Python thay vì mỗi package tự query lại (tránh N+1 trên toàn catalog).
+    approved_prefetch = Prefetch(
+        "versions",
+        queryset=PackageVersion.objects.filter(approved=True).order_by("-created_at"),
+        to_attr=APPROVED_VERSIONS_ATTR,
+    )
     results = []
-    for pkg in Package.objects.prefetch_related("versions"):
+    for pkg in Package.objects.prefetch_related(approved_prefetch):
         item = _updates_for_package(pkg)
         if item:
             results.append(item)
