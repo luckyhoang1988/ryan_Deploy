@@ -7,6 +7,7 @@ const NAV = [
   { to: "/packages", label: "Packages", icon: "package" },
   { to: "/machines", label: "Máy trạm", icon: "monitor" },
   { to: "/deployments", label: "Deployments", icon: "send" },
+  { to: "/schedules", label: "Lịch lặp", icon: "clock" },
   { to: "/updates", label: "Cập nhật", icon: "refreshCw" },
 ];
 

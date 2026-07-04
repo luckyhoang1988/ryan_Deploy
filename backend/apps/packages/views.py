@@ -44,6 +44,20 @@ class PackageViewSet(viewsets.ModelViewSet):
             package=package.name,
         )
 
+    @action(detail=False, methods=["post"])
+    def seed_catalog(self, request):
+        """
+        Nạp Package Library mẫu (mirror PDQ Deploy) — CHỈ metadata (tên/vendor/
+        inventory_name) cho các phần mềm doanh nghiệp phổ biến. KHÔNG kèm download_url:
+        admin tự upload hoặc "Tải từ URL" installer thật sau khi đã có sẵn khung Package.
+        Idempotent — gọi lại không tạo trùng (get_or_create theo tên).
+        """
+        from . import catalog_seed
+
+        result = catalog_seed.seed_default_catalog()
+        AuditLog.record(AuditLog.Action.CATALOG_SEED, user=request.user, **result)
+        return Response(result)
+
     @action(detail=True, methods=["post"])
     def fetch(self, request, pk=None):
         """

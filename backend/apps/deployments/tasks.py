@@ -5,7 +5,7 @@ from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Deployment, DeploymentStatus
+from .models import Deployment, DeploymentSchedule, DeploymentStatus
 from .orchestrator import launch_deployment
 
 logger = logging.getLogger("apps.deployments")
@@ -117,3 +117,56 @@ def reconcile_stuck_deployments():
         logger.info("Reconcile: tổng kết lại deployment kẹt RUNNING %s", dep_id)
 
     return {"reconciled": reconciled, "failed": failed}
+
+
+@shared_task
+def trigger_due_schedules():
+    """
+    Beat task (mỗi phút): kích hoạt các DeploymentSchedule (lịch lặp interval/weekly) đã
+    tới giờ. Khác với `trigger_scheduled_deployments` (chạy đúng 1 lần cho CHÍNH deployment
+    đó), ở đây mỗi lần tới giờ sẽ CLONE thành 1 Deployment MỚI (spawn_deployment) rồi launch
+    — giữ đầy đủ lịch sử job/audit từng lần chạy.
+    """
+    now = timezone.now()
+    triggered = 0
+
+    for sched in DeploymentSchedule.objects.filter(enabled=True):
+        # select_for_update + re-check is_due TRONG lock: nếu lần chạy trước của beat task
+        # (vd worker chậm) còn chồng lấn lần này, chỉ 1 trong 2 thấy is_due()==True sau khi
+        # lock (last_triggered_at đã được lần kia cập nhật) → tránh kích hoạt trùng.
+        with transaction.atomic():
+            locked = (
+                DeploymentSchedule.objects.select_for_update()
+                .filter(pk=sched.pk, enabled=True)
+                .first()
+            )
+            if locked is None or not locked.is_due(now):
+                continue
+            locked.last_triggered_at = now
+            locked.save(update_fields=["last_triggered_at", "updated_at"])
+
+        deployment = locked.spawn_deployment(now)
+        try:
+            job_count = launch_deployment(deployment)
+        except Exception:
+            logger.exception(
+                "launch_deployment lỗi cho schedule %s → đánh FAILED", locked.pk
+            )
+            deployment.status = DeploymentStatus.FAILED
+            deployment.finished_at = timezone.now()
+            deployment.save(update_fields=["status", "finished_at"])
+            continue
+
+        if job_count == 0:
+            # Không có máy đích enabled → không có gì để chạy, đóng lại tránh kẹt RUNNING.
+            deployment.status = DeploymentStatus.COMPLETED
+            deployment.finished_at = timezone.now()
+            deployment.save(update_fields=["status", "finished_at"])
+
+        triggered += 1
+        logger.info(
+            "Schedule %s (%s) kích hoạt deployment %s (%s job)",
+            locked.pk, locked.recurrence_type, deployment.pk, job_count,
+        )
+
+    return {"triggered": triggered}

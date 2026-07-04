@@ -204,6 +204,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.deployments.tasks.trigger_scheduled_deployments",
         "schedule": 60.0,  # mỗi phút: kích hoạt deployment đã tới giờ hẹn
     },
+    "trigger-due-deployment-schedules": {
+        "task": "apps.deployments.tasks.trigger_due_schedules",
+        "schedule": 60.0,  # mỗi phút: kích hoạt lịch lặp (interval/weekly) đã tới giờ
+    },
     "reconcile-stuck-deployments": {
         "task": "apps.deployments.tasks.reconcile_stuck_deployments",
         "schedule": 300.0,  # mỗi 5 phút: gỡ deployment kẹt RUNNING nếu chord callback không chạy

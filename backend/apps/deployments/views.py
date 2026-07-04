@@ -9,15 +9,12 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
 from apps.audit.models import AuditLog
-from apps.core.permissions import ROLE_ADMIN, has_role
+from apps.core.permissions import ROLE_ADMIN, IsOperatorOrAbove, has_role
 from apps.jobs.models import JobStatus
 
-from .models import Deployment, DeploymentAction, DeploymentStatus
+from .models import ADMIN_ONLY_ACTIONS, Deployment, DeploymentSchedule, DeploymentStatus
 from .orchestrator import cancel_deployment, launch_deployment
-from .serializers import DeploymentSerializer
-
-# Action phá hoại cao (reboot/shutdown cả fleet) — chỉ admin được kích hoạt.
-_ADMIN_ONLY_ACTIONS = (DeploymentAction.REBOOT, DeploymentAction.SHUTDOWN)
+from .serializers import DeploymentScheduleSerializer, DeploymentSerializer
 
 logger = logging.getLogger("apps.deployments")
 
@@ -101,7 +98,7 @@ class DeploymentViewSet(viewsets.ModelViewSet):
         """Kích hoạt deployment: fan-out thành các job và đẩy song song."""
         deployment = self.get_object()
 
-        if deployment.action in _ADMIN_ONLY_ACTIONS and not has_role(request.user, ROLE_ADMIN):
+        if deployment.action in ADMIN_ONLY_ACTIONS and not has_role(request.user, ROLE_ADMIN):
             return Response(
                 {"detail": "Chỉ admin được kích hoạt reboot/shutdown."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -186,3 +183,51 @@ class DeploymentViewSet(viewsets.ModelViewSet):
             AuditLog.Action.DEPLOYMENT_CANCEL, user=request.user, target=deployment
         )
         return Response({"detail": "Đã hủy."}, status=status.HTTP_200_OK)
+
+
+class DeploymentScheduleViewSet(viewsets.ModelViewSet):
+    """
+    Lịch lặp (recurring/repeating) — CRUD. Kích hoạt thật do beat task
+    `apps.deployments.tasks.trigger_due_schedules` xử lý, không có action thủ công ở đây.
+    """
+
+    queryset = (
+        DeploymentSchedule.objects.select_related("package_version__package", "credential")
+        .prefetch_related("target_machines")
+        .order_by("-created_at")
+    )
+    serializer_class = DeploymentScheduleSerializer
+    permission_classes = [IsOperatorOrAbove]
+
+    @staticmethod
+    def _check_admin_only_action(user, action):
+        # Cùng ràng buộc như DeploymentViewSet.trigger: reboot/shutdown lặp lại tự động
+        # trên cả fleet rủi ro cao hơn cả kích hoạt thủ công → chỉ admin được cấu hình.
+        if action in ADMIN_ONLY_ACTIONS and not has_role(user, ROLE_ADMIN):
+            raise ValidationError(
+                {"action": "Chỉ admin được tạo/sửa lịch lặp reboot/shutdown."}
+            )
+
+    def perform_create(self, serializer):
+        self._check_admin_only_action(self.request.user, serializer.validated_data.get("action"))
+        schedule = serializer.save()
+        AuditLog.record(
+            AuditLog.Action.SCHEDULE_CREATE, user=self.request.user, target=schedule, name=schedule.name
+        )
+
+    def perform_update(self, serializer):
+        action_value = serializer.validated_data.get("action") or serializer.instance.action
+        self._check_admin_only_action(self.request.user, action_value)
+        schedule = serializer.save()
+        AuditLog.record(
+            AuditLog.Action.SCHEDULE_UPDATE, user=self.request.user, target=schedule, name=schedule.name
+        )
+
+    def perform_destroy(self, instance):
+        name = instance.name
+        saved_pk = instance.pk
+        instance.delete()
+        instance.pk = saved_pk  # giữ target_id cho bản ghi audit sau khi delete()
+        AuditLog.record(
+            AuditLog.Action.SCHEDULE_DELETE, user=self.request.user, target=instance, name=name
+        )

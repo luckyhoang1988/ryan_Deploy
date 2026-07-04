@@ -31,6 +31,15 @@ export default function Packages() {
     } catch (e) { setErr(e.message); }
   };
 
+  const seedCatalog = async () => {
+    setErr(""); setMsg("");
+    try {
+      const r = await api.post("/packages/seed_catalog/", {});
+      setMsg(`Đã nạp Package Library mẫu: tạo mới ${r.created}, bỏ qua ${r.skipped} (đã có).`);
+      load();
+    } catch (e) { setErr(e.message); }
+  };
+
   const removePkg = async (p) => {
     if (!confirm(`Xóa package "${p.name}" và toàn bộ ${p.versions?.length || 0} version của nó?`)) return;
     setErr(""); setMsg("");
@@ -59,6 +68,11 @@ export default function Packages() {
           {isAdmin && (
             <button className="btn ghost" onClick={() => setShowHistory((s) => !s)}>
               {showHistory ? "Ẩn lịch sử tải" : "Lịch sử tải"}
+            </button>
+          )}
+          {isAdmin && (
+            <button className="btn ghost" onClick={seedCatalog} title="Tạo sẵn Package (tên/vendor) cho phần mềm phổ biến — chưa kèm installer">
+              📚 Nạp Package Library mẫu
             </button>
           )}
           {isAdmin && <button className="btn ghost" onClick={() => setShowFetch(true)}>↓ Tải từ URL</button>}

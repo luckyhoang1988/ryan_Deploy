@@ -8,7 +8,7 @@ import io
 import pytest
 
 from apps.machines.models import InstalledSoftware, Machine
-from apps.packages import downloader, updates
+from apps.packages import catalog_seed, downloader, updates
 from apps.packages.models import (
     AutoDownloadPolicy,
     Package,
@@ -250,6 +250,46 @@ def test_approve_endpoint(db, roles):
     assert r.status_code == 200
     pv.refresh_from_db()
     assert pv.approved is True and pv.approved_at is not None
+
+
+# ==================== Package Library seed (metadata only) ====================
+
+
+def test_seed_default_catalog_creates_packages(db):
+    result = catalog_seed.seed_default_catalog()
+    assert result["created"] == len(catalog_seed.DEFAULT_CATALOG)
+    assert result["skipped"] == 0
+    assert Package.objects.filter(name="7-Zip", inventory_name="7-Zip").exists()
+    # Metadata only — không tạo version/URL nào.
+    assert not PackageVersion.objects.exists()
+    assert all(not p.download_url for p in Package.objects.all())
+
+
+def test_seed_default_catalog_idempotent(db):
+    catalog_seed.seed_default_catalog()
+    result = catalog_seed.seed_default_catalog()
+    assert result["created"] == 0
+    assert result["skipped"] == len(catalog_seed.DEFAULT_CATALOG)
+    assert Package.objects.count() == len(catalog_seed.DEFAULT_CATALOG)
+
+
+def test_seed_default_catalog_does_not_overwrite_existing(db):
+    # Package đã có sẵn (admin tự chỉnh) → seed KHÔNG được ghi đè vendor đã sửa.
+    Package.objects.create(name="7-Zip", vendor="Đã chỉnh tay")
+    catalog_seed.seed_default_catalog()
+    pkg = Package.objects.get(name="7-Zip")
+    assert pkg.vendor == "Đã chỉnh tay"
+
+
+def test_seed_catalog_endpoint_admin_only(db, roles):
+    op = _client("op9", group="operator")
+    r = op.post("/api/packages/seed_catalog/", {}, content_type="application/json")
+    assert r.status_code == 403
+
+    admin = _client("admin9", superuser=True)
+    r = admin.post("/api/packages/seed_catalog/", {}, content_type="application/json")
+    assert r.status_code == 200
+    assert r.json()["created"] == len(catalog_seed.DEFAULT_CATALOG)
 
 
 def test_update_deploy_endpoint(db, roles, monkeypatch):

@@ -14,6 +14,35 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-04 — Recurring schedule: model "template" tách khỏi Deployment "instance" để giữ lịch sử
+**Bối cảnh:** Thêm lịch lặp (interval/weekly, kiểu PDQ Repeating/Recurring). Deployment vốn
+đã có `scheduled_at` cho lịch CHẠY-1-LẦN, và `Job` có `unique_together(deployment, machine)`
+nên không thể tái dùng cùng 1 Deployment cho nhiều lần chạy lặp lại (lần 2 sẽ update_or_create
+đè job của lần 1, mất lịch sử).
+**Bài học:**
+1. Tạo model riêng `DeploymentSchedule` (cấu hình mẫu: action/package_version/credential/
+   target_machines/targeting_rule + recurrence_type/interval_minutes/weekly_days/weekly_time
+   + enabled/last_triggered_at) KHÔNG kế thừa/dùng chung bảng với `Deployment`. Mỗi lần
+   `is_due()` đúng, `spawn_deployment()` tạo Deployment MỚI (clone field + set target_machines)
+   rồi gọi `launch_deployment()` y hệt luồng thủ công — không phải sửa orchestrator/executor.
+2. `Deployment.schedule` (FK nullable, SET_NULL) trỏ ngược về lịch đã sinh ra nó — cho UI liệt
+   kê lịch sử các lần chạy của 1 lịch mà không cần bảng phụ.
+3. **`is_due()` cho weekly phải làm việc ở LOCAL time**, không phải `timezone.now()` (UTC):
+   dùng `timezone.localtime(now)` để lấy đúng `weekday()`/giờ theo `TIME_ZONE` server, rồi so
+   `last_triggered_at` (cũng phải `localtime()`) với mốc giờ hẹn hôm nay để biết "đã chạy hôm
+   nay chưa" — so sánh thẳng bằng UTC sẽ sai ngày/giờ ở gần nửa đêm.
+4. **Double-trigger guard**: `select_for_update()` + re-check `is_due()` TRONG transaction,
+   set `last_triggered_at` xong mới launch NGOÀI transaction (giống pattern claim SCHEDULED→
+   RUNNING của `trigger_scheduled_deployments`). sqlite không lock thật (chỉ Postgres prod mới
+   chặn race thật) nhưng logic vẫn đúng đơn luồng cho test.
+5. **DRF M2M field trên model không `blank=True` mặc định `allow_empty=False`**: POST
+   `target_machines: []` bị chặn "This list may not be empty." — test API phải luôn kèm
+   ít nhất 1 id, không thể để rỗng như khi tạo qua ORM trực tiếp.
+**Áp dụng:** Bất kỳ tính năng "lặp lại tự động" nào sinh ra bản ghi audit/lịch sử → tách model
+CẤU HÌNH khỏi model KẾT QUẢ MỘT LẦN CHẠY, đừng tái dùng unique_together của bảng kết quả.
+So sánh ngày/giờ theo lịch địa phương luôn qua `timezone.localtime()`, không thao tác trực
+tiếp trên datetime UTC của `timezone.now()`.
+
 ## 2026-07-04 — Package catalog: property lọc (`.filter().first()`) không ăn cache của prefetch_related thường
 **Bối cảnh:** Review toàn bộ backend so với PDQ Deploy để tìm bug/tối ưu. `Package.latest_version`
 là `@property` gọi `self.versions.filter(approved=True).first()`. `updates.compute_updates()` và

@@ -21,9 +21,13 @@ class AuditLog(models.Model):
         DEPLOYMENT_DELETE = "deployment_delete", "Xóa deployment"
         DEPLOYMENT_TRIGGER = "deployment_trigger", "Kích hoạt deployment"
         DEPLOYMENT_CANCEL = "deployment_cancel", "Hủy deployment"
+        SCHEDULE_CREATE = "schedule_create", "Tạo lịch lặp"
+        SCHEDULE_UPDATE = "schedule_update", "Sửa lịch lặp"
+        SCHEDULE_DELETE = "schedule_delete", "Xóa lịch lặp"
         JOB_START = "job_start", "Bắt đầu job"
         JOB_FINISH = "job_finish", "Kết thúc job"
         MACHINE_SYNC = "machine_sync", "Đồng bộ máy từ AD"
+        CATALOG_SEED = "catalog_seed", "Nạp Package Library mẫu"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
