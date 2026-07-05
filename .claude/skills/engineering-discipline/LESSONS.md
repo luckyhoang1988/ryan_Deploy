@@ -14,6 +14,32 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-05 — Package .zip nhiều file (Office2016): {dir} token + tar.exe extract, quirk quoting {file}/{dir} có sẵn
+**Bối cảnh:** Thêm `InstallerType.ZIP` để deploy được bộ cài nhiều file/thư mục (VD Office2016
+offline source) — nén thành 1 file `.zip`, `PushExecutor` tự giải nén trên máy đích bằng `tar.exe`
+vào thư mục con "extracted" TRƯỚC khi chạy `install_command`, token mới `{dir}` trỏ tới thư mục đó.
+**Bài học:**
+1. **`DEFAULT_SILENT_COMMANDS` đặt token NẰM TRONG dấu ngoặc kép của chính literal string** (VD
+   `exe`: `'"{file}" /S'` — dấu `"` bao quanh cả `{file}`), trong khi `_copy_payload` lại thay
+   `{file}`/`{dir}` bằng giá trị ĐÃ TỰ QUOTE (`f'"{payload_disk}"'`). Kết quả thực tế là chuỗi có
+   dấu nháy kép LẶP ở đầu (`""C:\...\x.exe"` chứ không phải `"C:\...\x.exe"`) — đây là quirk CÓ SẴN
+   từ trước cho msi/exe/msix (không phải bug tôi tạo ra khi thêm "zip"), và test không nên tự đoán
+   chuỗi kỳ vọng bằng tay (dễ sai) mà phải tính `template.replace(token, f'"{disk}"')` giống hệt
+   code thật rồi so sánh, hoặc chỉ assert các phần không phụ thuộc dấu ngoặc (VD `bat.index(...)`
+   thứ tự trước/sau).
+2. **`tar.exe` builtin của Windows (từ 10 1803 / Server 2019) giải nén được `.zip`** (dùng bsdtar
+   nội bộ) — chọn thay vì `powershell Expand-Archive` vì không đụng `-ExecutionPolicy`/AMSI. CHƯA
+   verify trên máy Windows thật (môi trường này không có máy đích Windows để chạy end-to-end) —
+   chỉ verify được ở mức unit test (SMB giả lập ghi/đọc bat) + đọc tài liệu Microsoft xác nhận
+   `tar.exe` có sẵn từ các phiên bản đó.
+3. Thêm 1 member mới vào `TextChoices` (VD `InstallerType.ZIP`) LUÔN sinh migration `AlterField`
+   dù cột DB không đổi kiểu — đã biết từ bài học 2026-07-03 (JsonFormatter) nhưng nhắc lại vì dễ
+   quên chạy `makemigrations` sau khi sửa `choices`.
+**Áp dụng:** Khi thêm placeholder/token mới cho command template trong engine này, kiểm tra xem
+template mẫu có tự bọc quote quanh token không trước khi viết test so sánh chuỗi cuối. Tính năng
+"giải nén trên máy đích" nào cũng nên ưu tiên `tar.exe`/binary có sẵn của Windows hơn PowerShell có
+policy, nhưng ghi rõ trong PR/lesson là CHƯA test thật trên Windows nếu không có máy để verify.
+
 ## 2026-07-05 — rm -rf dọn dẹp sau verify: xóa nhầm backend/media/packages/ (không phải do mình tạo)
 **Bối cảnh:** Sau khi verify UI redesign Wizard bằng backend thật (settings.test, sqlite), dọn
 dẹp bằng `rm -f test_db.sqlite3 && rm -rf backend/media/packages 2>/dev/null` trong CÙNG một

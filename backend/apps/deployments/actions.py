@@ -10,6 +10,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from apps.packages.models import InstallerType
 from apps.packages.repository import DEFAULT_SUCCESS_EXIT_CODES
 
 from .models import DeploymentAction
@@ -36,6 +37,7 @@ class ActionPlan:
     # Hậu kiểm sau khi chạy thành công: kiểm registry có/không có phần mềm (chống false-success).
     verify_name: Optional[str] = None        # None/"" = bỏ qua hậu kiểm
     verify_present: bool = True              # True = kỳ vọng CÓ (install); False = kỳ vọng MẤT (uninstall)
+    extract_payload: bool = False            # payload là archive .zip -> giải nén trước khi chạy command
 
 
 def _installer_ref(pv):
@@ -58,14 +60,15 @@ def build_action_plan(deployment, machine) -> ActionPlan:
             verify_installer=True,
             verify_name=(pv.verify_name or "").strip() or None,
             verify_present=True,  # sau install: kỳ vọng phần mềm CÓ mặt
+            extract_payload=pv.installer_type == InstallerType.ZIP,
         )
 
     if action == DeploymentAction.UNINSTALL:
         pv = deployment.package_version
         command = pv.uninstall_command
         # Nhiều uninstall dùng "msiexec /x {ProductCode}" — không cần installer file.
-        # Chỉ đẩy file khi command tham chiếu {file}.
-        needs_file = "{file}" in command
+        # Chỉ đẩy file khi command tham chiếu {file} hoặc {dir} (archive giải nén).
+        needs_file = "{file}" in command or "{dir}" in command
         path, name = _installer_ref(pv) if needs_file else (None, None)
         return ActionPlan(
             command=command,
@@ -75,6 +78,7 @@ def build_action_plan(deployment, machine) -> ActionPlan:
             verify_installer=needs_file,
             verify_name=(pv.verify_name or "").strip() or None,
             verify_present=False,  # sau uninstall: kỳ vọng phần mềm ĐÃ MẤT
+            extract_payload=needs_file and pv.installer_type == InstallerType.ZIP,
         )
 
     if action == DeploymentAction.REBOOT:

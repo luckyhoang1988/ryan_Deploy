@@ -143,6 +143,7 @@ class PushExecutor:
         payload_filename: Optional[str] = None,
         success_exit_codes: Optional[list[int]] = None,
         job_token: Optional[str] = None,
+        extract_payload: bool = False,
     ) -> ExecResult:
         """
         Chạy một tác vụ trên máy đích qua SMB + service tạm.
@@ -151,6 +152,9 @@ class PushExecutor:
           command được thay bằng đường dẫn payload trên đĩa máy đích.
         - `local_payload_path`/`payload_filename`: file cần đẩy (installer hoặc script).
           Bỏ trống → tác vụ không cần file (vd reboot/shutdown).
+        - `extract_payload`: payload là archive .zip nhiều file (VD bộ cài Office) — giải nén
+          bằng `tar.exe` (có sẵn từ Windows 10 1803/Server 2019) vào thư mục tạm TRƯỚC khi
+          chạy `command`; token `{dir}` trong command được thay bằng đường dẫn thư mục đó.
         """
         success_exit_codes = success_exit_codes or [0, 3010]
         job_token = job_token or uuid.uuid4().hex[:12]
@@ -167,7 +171,9 @@ class PushExecutor:
             self._emit(STEP_COPY, "Kết nối SMB và copy payload...")
             result.step_reached = STEP_COPY
             self._connect()
-            self._copy_payload(job_token, command, local_payload_path, payload_filename)
+            self._copy_payload(
+                job_token, command, local_payload_path, payload_filename, extract_payload
+            )
 
             # 3) EXECUTE -----------------------------------------------------
             self._abort_if_cancelled()
@@ -249,25 +255,53 @@ class PushExecutor:
                 # đã tồn tại -> bỏ qua
                 pass
 
-    def _copy_payload(self, job_token, command, local_payload_path=None, payload_filename=None):
+    def _copy_payload(
+        self, job_token, command, local_payload_path=None, payload_filename=None,
+        extract_payload=False,
+    ):
         conn = self._conn
         self._ensure_dirs(job_token)
 
         # Upload payload (installer/script) nếu có; token {file} -> đường dẫn trên máy đích.
         # Tác vụ không cần file (vd reboot/shutdown) thì command chạy nguyên văn.
+        extract_line = ""
         if local_payload_path and payload_filename:
             with open(local_payload_path, "rb") as fh:
                 conn.putFile(self.ADMIN_SHARE, self._share_path(job_token, payload_filename), fh.read)
             payload_disk = self._disk_path(job_token, payload_filename)
             command = command.replace("{file}", f'"{payload_disk}"')
 
+            if extract_payload:
+                # Giải nén archive .zip vào thư mục con "extracted" TRƯỚC khi chạy command;
+                # {dir} trong command -> đường dẫn thư mục đã giải nén trên máy đích.
+                extract_share = self._share_path(job_token, "extracted")
+                try:
+                    conn.createDirectory(self.ADMIN_SHARE, extract_share)
+                except Exception:
+                    pass
+                extract_disk = self._disk_path(job_token, "extracted")
+                command = command.replace("{dir}", f'"{extract_disk}"')
+
         # Sinh wrapper .bat: chạy command, ghi stdout + exit code ra file
         stdout_disk = self._disk_path(job_token, "stdout.log")
         exit_disk = self._disk_path(job_token, "exit.code")
 
+        if local_payload_path and payload_filename and extract_payload:
+            extract_line = (
+                f'tar -xf "{payload_disk}" -C "{extract_disk}" > "{stdout_disk}" 2>&1\r\n'
+                "if errorlevel 1 (\r\n"
+                f'  echo %ERRORLEVEL% > "{exit_disk}"\r\n'
+                "  exit /b\r\n"
+                ")\r\n"
+            )
+            stdout_redirect = ">>"
+        else:
+            stdout_redirect = ">"
+
         bat = (
             "@echo off\r\n"
-            f'{command} > "{stdout_disk}" 2>&1\r\n'
+            f"{extract_line}"
+            f'{command} {stdout_redirect} "{stdout_disk}" 2>&1\r\n'
             f'echo %ERRORLEVEL% > "{exit_disk}"\r\n'
         )
         conn.putFile(

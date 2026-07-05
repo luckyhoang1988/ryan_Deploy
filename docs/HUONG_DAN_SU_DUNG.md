@@ -95,12 +95,24 @@ Có 2 cách:
 ### 6.2. Thêm phần mềm mới
 Chỉ admin thao tác được:
 
-1. **"+ Upload version"** — chọn package có sẵn hoặc tạo package mới, upload file cài đặt (`.msi/.exe/.msu/.msp/.msix`), nhập số version. Hệ thống tự:
+1. **"+ Upload version"** — chọn package có sẵn hoặc tạo package mới, upload file cài đặt (`.msi/.exe/.msu/.msp/.msix/.zip`), nhập số version. Hệ thống tự:
    - Tính mã băm SHA-256 của file để chống giả mạo.
    - Gợi ý sẵn lệnh cài âm thầm (silent command) theo loại file (có thể sửa lại, dùng `{file}` làm placeholder cho tên file installer).
    - Cho nhập thêm **tên hậu kiểm (verify_name)** — dùng để soi registry Uninstall sau khi cài, tránh trường hợp "báo thành công giả" (false success).
 2. **"↓ Tải từ URL"** — nhập URL trực tiếp tới file cài đặt + nhãn version, hệ thống tải nền, tự tính SHA-256, lưu lại trong **Lịch sử tải**.
 3. **"📚 Nạp Package Library mẫu"** — nạp sẵn metadata các phần mềm phổ biến trong doanh nghiệp (chưa kèm file cài đặt thật, cần upload file riêng).
+
+#### Package nhiều file/thư mục (VD Office2016)
+
+Một số bộ cài (Office, Adobe...) không phải 1 file duy nhất mà là cả thư mục (`setup.exe` + nhiều thư mục con). RyanDeploy chỉ nhận **đúng 1 file installer** mỗi version, nên với các bộ cài này:
+
+1. Nén toàn bộ thư mục cài đặt thành **1 file `.zip`** (VD nén cả thư mục nguồn Office2016 gồm `setup.exe`, `configuration.xml`, các thư mục ngôn ngữ...).
+2. Upload file `.zip` đó như một version bình thường.
+3. Ở ô **lệnh cài**, dùng token `{dir}` thay vì `{file}` — hệ thống sẽ tự giải nén file `.zip` vào một thư mục tạm trên máy đích TRƯỚC khi chạy lệnh, `{dir}` trỏ tới thư mục đã giải nén đó. Ví dụ với Office2016 (Office Deployment Tool):
+   ```
+   "{dir}\setup.exe" /configure "{dir}\configuration.xml"
+   ```
+4. Lưu ý: giới hạn dung lượng upload (`RYANDEPLOY_MAX_INSTALLER_MB`, mặc định 8192 MB) có thể cần tăng thêm qua biến môi trường nếu bộ cài quá lớn (nhiều ngôn ngữ/kiến trúc).
 
 ### 6.3. Quản lý version
 - **Duyệt (Approve)**: chỉ version đã duyệt mới được tính là "bản mới nhất" khi Deploy 1-chạm ở trang Cập nhật, hoặc khi dò cập nhật. Version upload thủ công mặc định đã duyệt sẵn.

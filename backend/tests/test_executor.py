@@ -70,3 +70,63 @@ def test_precheck_dns_failure(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", boom)
     with pytest.raises(ExecutorError, match="DNS"):
         _ex()._precheck()
+
+
+class _FakeConn:
+    """SMBConnection giả: ghi lại putFile/createDirectory thay vì gọi SMB thật."""
+
+    def __init__(self):
+        self.files = {}
+        self.dirs = []
+
+    def createDirectory(self, share, path):
+        self.dirs.append(path)
+
+    def putFile(self, share, path, read_cb):
+        buf = b""
+        while True:
+            chunk = read_cb(65536)
+            if not chunk:
+                break
+            buf += chunk
+        self.files[path] = buf
+
+
+def test_copy_payload_extract_zip_generates_tar_and_dir_token(tmp_path):
+    ex = _ex()
+    ex._conn = _FakeConn()
+    payload = tmp_path / "src.zip"
+    payload.write_bytes(b"PK\x03\x04fakezip")
+    template = '"{dir}\\setup.exe" /S'
+
+    ex._copy_payload("jobZ", template, str(payload), "src.zip", True)
+
+    bat = ex._conn.files[ex._share_path("jobZ", "run.bat")].decode()
+    payload_disk = ex._disk_path("jobZ", "src.zip")
+    extract_disk = ex._disk_path("jobZ", "extracted")
+    expected_command = template.replace("{dir}", f'"{extract_disk}"')
+
+    assert ex._share_path("jobZ", "extracted") in ex._conn.dirs
+    assert f'tar -xf "{payload_disk}" -C "{extract_disk}"' in bat
+    assert f"{expected_command} >>" in bat  # append vì đứng sau lệnh giải nén
+    # Lệnh giải nén phải đứng TRƯỚC lệnh chính trong bat.
+    assert bat.index("tar -xf") < bat.index(expected_command)
+
+
+def test_copy_payload_no_extract_keeps_single_file_redirect(tmp_path):
+    ex = _ex()
+    ex._conn = _FakeConn()
+    payload = tmp_path / "app.exe"
+    payload.write_bytes(b"MZfake")
+    template = '"{file}" /S'
+
+    ex._copy_payload("jobY", template, str(payload), "app.exe", False)
+
+    bat = ex._conn.files[ex._share_path("jobY", "run.bat")].decode()
+    payload_disk = ex._disk_path("jobY", "app.exe")
+    expected_command = template.replace("{file}", f'"{payload_disk}"')
+
+    assert "tar -xf" not in bat
+    assert ex._share_path("jobY", "extracted") not in ex._conn.dirs
+    assert f"{expected_command} > " in bat
+    assert f"{expected_command} >> " not in bat

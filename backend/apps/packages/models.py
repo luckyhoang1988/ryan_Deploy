@@ -21,6 +21,7 @@ class InstallerType(models.TextChoices):
     MSU = "msu", "Windows Update (.msu)"
     MSP = "msp", "Patch (.msp)"
     MSIX = "msix", "MSIX/AppX (.msix/.appx)"
+    ZIP = "zip", "Archive nhiều file (.zip, tự giải nén)"
 
 
 class AutoDownloadPolicy(models.TextChoices):

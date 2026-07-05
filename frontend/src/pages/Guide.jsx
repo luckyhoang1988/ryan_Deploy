@@ -196,7 +196,7 @@ export default function Guide() {
           <ol>
             <li>
               <b>"+ Upload version"</b> — chọn package có sẵn hoặc tạo package mới, upload file
-              cài đặt (.msi/.exe/.msu/.msp/.msix), nhập số version. Hệ thống tự tính mã băm
+              cài đặt (.msi/.exe/.msu/.msp/.msix/.zip), nhập số version. Hệ thống tự tính mã băm
               SHA-256 của file để chống giả mạo, gợi ý sẵn lệnh cài âm thầm (silent command) theo
               loại file (có thể sửa lại, dùng <code>{"{file}"}</code> làm placeholder cho tên file
               installer), và cho nhập thêm <b>tên hậu kiểm (verify_name)</b> — dùng để soi registry
@@ -211,6 +211,24 @@ export default function Guide() {
               doanh nghiệp (chưa kèm file cài đặt thật, cần upload file riêng).
             </li>
           </ol>
+          <h3>6.2.1. Package nhiều file/thư mục (VD Office2016)</h3>
+          <p>
+            Một số bộ cài (Office, Adobe...) không phải 1 file mà là cả thư mục (<code>setup.exe</code>{" "}
+            + nhiều thư mục con). RyanDeploy chỉ nhận đúng 1 file installer mỗi version, nên với các
+            bộ cài này: nén toàn bộ thư mục cài đặt thành <b>1 file .zip</b>, upload như một version
+            bình thường, rồi ở ô lệnh cài dùng token <code>{"{dir}"}</code> thay vì{" "}
+            <code>{"{file}"}</code> — hệ thống tự giải nén file .zip vào thư mục tạm trên máy đích
+            TRƯỚC khi chạy lệnh, <code>{"{dir}"}</code> trỏ tới thư mục đã giải nén. Ví dụ Office2016
+            (Office Deployment Tool):
+          </p>
+          <p>
+            <code>{'"{dir}\\setup.exe" /configure "{dir}\\configuration.xml"'}</code>
+          </p>
+          <p>
+            Lưu ý: giới hạn dung lượng upload (biến môi trường{" "}
+            <code>RYANDEPLOY_MAX_INSTALLER_MB</code>, mặc định 8192 MB) có thể cần tăng thêm nếu bộ
+            cài quá lớn.
+          </p>
           <h3>6.3. Quản lý version</h3>
           <ul>
             <li>

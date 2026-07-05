@@ -20,6 +20,10 @@ DEFAULT_SILENT_COMMANDS = {
     #   NSIS:          "{file}" /S
     #   InstallShield: "{file}" /s /v"/qn"
     "exe": '"{file}" /S',
+    # ZIP: giải nén sẵn vào {dir} trước khi lệnh chạy (xem PushExecutor._copy_payload).
+    # Admin phải sửa lại đường dẫn/entry point thật bên trong archive, vd Office2016 ODT:
+    #   "{dir}\setup.exe" /configure "{dir}\configuration.xml"
+    "zip": '"{dir}\\setup.exe" /S',
 }
 
 # Mã exit code coi là thành công theo mặc định (0 = OK, 3010 = OK cần reboot).
@@ -34,6 +38,7 @@ _INSTALLER_EXTENSIONS = {
     ".msix": "msix",
     ".appx": "msix",
     ".exe": "exe",
+    ".zip": "zip",
 }
 
 

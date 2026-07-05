@@ -71,6 +71,40 @@ def test_uninstall_with_file_uploads_installer(credential, machine):
     assert plan.verify_installer is True
 
 
+def test_install_plan_zip_sets_extract_payload(credential, machine):
+    pv = _pv(installer_type=InstallerType.ZIP, installer_file="repository/x/1/src.zip",
+              install_command='"{dir}\\setup.exe" /S')
+    dep = _dep(credential, DeploymentAction.INSTALL, pv)
+    plan = build_action_plan(dep, machine)
+    assert plan.extract_payload is True
+    assert plan.payload_filename == "src.zip"
+
+
+def test_install_plan_non_zip_no_extract_payload(credential, machine):
+    dep = _dep(credential, DeploymentAction.INSTALL, _pv())
+    plan = build_action_plan(dep, machine)
+    assert plan.extract_payload is False
+
+
+def test_uninstall_zip_with_dir_token_sets_extract_payload(credential, machine):
+    pv = _pv(installer_type=InstallerType.ZIP, installer_file="repository/x/1/src.zip",
+              uninstall_command='"{dir}\\setup.exe" /uninstall /S')
+    dep = _dep(credential, DeploymentAction.UNINSTALL, pv)
+    plan = build_action_plan(dep, machine)
+    assert plan.extract_payload is True
+    assert plan.payload_filename == "src.zip"
+
+
+def test_uninstall_zip_by_productcode_no_extract_payload(credential, machine):
+    # Không tham chiếu {file}/{dir} → không cần đẩy/giải nén archive dù installer_type là zip.
+    pv = _pv(installer_type=InstallerType.ZIP, installer_file="repository/x/1/src.zip",
+              uninstall_command="msiexec /x {12345} /qn")
+    dep = _dep(credential, DeploymentAction.UNINSTALL, pv)
+    plan = build_action_plan(dep, machine)
+    assert plan.extract_payload is False
+    assert plan.payload_path is None
+
+
 def test_reboot_plan_is_payloadless(credential, machine):
     plan = build_action_plan(_dep(credential, DeploymentAction.REBOOT), machine)
     assert plan.command == REBOOT_COMMAND

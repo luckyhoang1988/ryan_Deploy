@@ -163,6 +163,7 @@ def _run_job(self, job, deployment, machine, credential, pv):
         payload_filename=plan.payload_filename,
         success_exit_codes=plan.success_exit_codes,
         job_token=f"job{job.pk}",
+        extract_payload=plan.extract_payload,
     )
 
     # Bị hủy giữa chừng (cancel_check kích hoạt hoặc revoke đặt CANCELLED) → giữ nguyên

@@ -620,9 +620,9 @@ function VersionModal({ version, onClose, onDone }) {
         <h3>Sửa version — {version.package_name}</h3>
         <label>Version</label>
         <input value={form.version} onChange={set("version")} required />
-        <label>Lệnh cài (silent). Dùng {"{file}"}</label>
+        <label>Lệnh cài (silent). Dùng {"{file}"} (file installer) hoặc {"{dir}"} (nếu installer là .zip, trỏ tới thư mục đã giải nén)</label>
         <input value={form.install_command} onChange={set("install_command")} placeholder='msiexec /i {file} /qn /norestart' />
-        <label>Lệnh gỡ (tùy chọn)</label>
+        <label>Lệnh gỡ (tùy chọn). Dùng {"{file}"}/{"{dir}"} như trên nếu cần lại installer</label>
         <input value={form.uninstall_command} onChange={set("uninstall_command")} />
         <label>Hậu kiểm — tên phần mềm (tùy chọn)</label>
         <input value={form.verify_name} onChange={set("verify_name")} placeholder="Firefox" />
@@ -691,9 +691,9 @@ function UploadModal({ packages, onClose, onDone }) {
         )}
         <label>Version</label>
         <input value={version} onChange={(e) => setVersion(e.target.value)} required />
-        <label>File installer (.msi/.exe)</label>
+        <label>File installer (.msi/.exe/.msu/.msp/.msix/.zip)</label>
         <input type="file" onChange={(e) => setFile(e.target.files[0])} required />
-        <label>Lệnh silent (để trống = tự gợi ý). Dùng {"{file}"}</label>
+        <label>Lệnh silent (để trống = tự gợi ý). Dùng {"{file}"} (file installer) hoặc {"{dir}"} (nếu upload .zip, trỏ tới thư mục đã giải nén — VD Office2016: "{"{dir}"}\setup.exe" /configure "{"{dir}"}\configuration.xml")</label>
         <input value={installCommand} onChange={(e) => setInstallCommand(e.target.value)} placeholder='msiexec /i {file} /qn /norestart' />
         <label>Hậu kiểm — tên phần mềm (tùy chọn, để trống = không kiểm)</label>
         <input value={verifyName} onChange={(e) => setVerifyName(e.target.value)} placeholder='Firefox' />

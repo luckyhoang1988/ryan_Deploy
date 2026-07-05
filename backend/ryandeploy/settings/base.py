@@ -180,7 +180,8 @@ RYANDEPLOY = {
     "JOB_TIMEOUT": env_int("RYANDEPLOY_JOB_TIMEOUT", 1800),
     # Trần kích thước file installer được upload (MB) — chặn làm đầy đĩa. Django stream
     # file lớn ra temp disk (không nạp hết RAM) nên đây là giới hạn dung lượng, không phải RAM.
-    "MAX_INSTALLER_MB": env_int("RYANDEPLOY_MAX_INSTALLER_MB", 2048),
+    # 8192 (8 GB) đủ cho package archive .zip nhiều file (VD bộ cài Office offline).
+    "MAX_INSTALLER_MB": env_int("RYANDEPLOY_MAX_INSTALLER_MB", 8192),
     # --- Catalog / Auto Download ---
     # Timeout (giây) khi tải installer từ URL ngoài (downloader.py).
     "DOWNLOAD_TIMEOUT": env_int("RYANDEPLOY_DOWNLOAD_TIMEOUT", 300),

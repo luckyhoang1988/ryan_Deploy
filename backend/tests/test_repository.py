@@ -38,6 +38,7 @@ def test_detect_installer_type():
     assert repository.detect_installer_type("App.MSIXBUNDLE") == "msix"
     assert repository.detect_installer_type("App.appx") == "msix"
     assert repository.detect_installer_type("noext") == "exe"  # mặc định
+    assert repository.detect_installer_type("Office2016.zip") == "zip"
 
 
 def test_upload_without_installer_type_autodetects(db, settings, tmp_path):
@@ -59,6 +60,7 @@ def test_default_install_command():
     assert "{file}" in repository.default_install_command("exe")
     msix = repository.default_install_command("msix")
     assert "Add-AppxProvisionedPackage" in msix and "{file}" in msix
+    assert "{dir}" in repository.default_install_command("zip")
 
 
 def test_compute_sha256_known_value():
