@@ -74,10 +74,13 @@ export function listOf(data) {
 
 // Lấy TOÀN BỘ bản ghi qua mọi trang phân trang (dùng cho picker cần đủ danh sách,
 // vd chọn máy đích — API mặc định chỉ trả 25/trang).
+const FETCH_ALL_MAX_PAGES = 20000; // an toàn chống vòng lặp vô hạn, không phải trần thực tế
+
 export async function fetchAll(path) {
   let out = [];
   let next = path;
-  for (let i = 0; i < 500 && next; i++) {
+  let i = 0;
+  for (; i < FETCH_ALL_MAX_PAGES && next; i++) {
     const data = await api.get(next);
     if (Array.isArray(data)) return data; // endpoint không phân trang
     out = out.concat(data.results ?? []);
@@ -85,6 +88,11 @@ export async function fetchAll(path) {
     // data.next là URL tuyệt đối; lấy path+query sau tiền tố /api để gọi tiếp.
     const u = new URL(data.next);
     next = u.pathname.replace(/^\/api/, "") + u.search;
+  }
+  if (i >= FETCH_ALL_MAX_PAGES && next) {
+    // Chạm trần an toàn mà vẫn còn trang tiếp theo → dữ liệu BỊ CẮT, phải biết ngay
+    // thay vì im lặng thiếu (vd wizard chọn máy đích thiếu máy mà không báo).
+    console.warn(`fetchAll(${path}): dừng ở ${FETCH_ALL_MAX_PAGES} trang, còn dữ liệu — kết quả bị cắt.`);
   }
   return out;
 }

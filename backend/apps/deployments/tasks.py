@@ -142,6 +142,7 @@ def trigger_due_schedules():
             )
             if locked is None or not locked.is_due(now):
                 continue
+            previous_triggered_at = locked.last_triggered_at
             locked.last_triggered_at = now
             locked.save(update_fields=["last_triggered_at", "updated_at"])
 
@@ -155,6 +156,13 @@ def trigger_due_schedules():
             deployment.status = DeploymentStatus.FAILED
             deployment.finished_at = timezone.now()
             deployment.save(update_fields=["status", "finished_at"])
+            # Launch thất bại → coi như CHƯA kích hoạt: trả lại last_triggered_at để lịch
+            # được thử lại ở tick kế tiếp thay vì mất hẳn 1 chu kỳ. An toàn với double-trigger
+            # vì lúc này transaction claim ở trên đã commit xong (mọi lần chạy chồng lấn bị
+            # khóa chờ đều đã đọc last_triggered_at MỚI trước khi ta revert nó ở đây).
+            DeploymentSchedule.objects.filter(pk=locked.pk).update(
+                last_triggered_at=previous_triggered_at
+            )
             continue
 
         if job_count == 0:

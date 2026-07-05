@@ -1,18 +1,18 @@
 from rest_framework import viewsets
 
 from apps.audit.models import AuditLog
-from apps.core.permissions import IsAdmin
+from apps.core.permissions import IsAdminStrict
 
 from .models import DeployCredential
 from .serializers import DeployCredentialSerializer
 
 
 class DeployCredentialViewSet(viewsets.ModelViewSet):
-    """Quản lý credential deploy — chỉ admin. Password không bao giờ trả ra."""
+    """Quản lý credential deploy — chỉ admin (kể cả đọc, không lộ username/domain cho viewer)."""
 
     queryset = DeployCredential.objects.all()
     serializer_class = DeployCredentialSerializer
-    permission_classes = [IsAdmin]
+    permission_classes = [IsAdminStrict]
 
     def perform_create(self, serializer):
         cred = serializer.save()

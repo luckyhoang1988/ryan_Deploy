@@ -80,7 +80,18 @@ def _run_job(self, job, deployment, machine, credential, pv):
     if plan.verify_installer:
         from apps.packages.repository import verify_integrity
 
-        ok, actual = verify_integrity(pv)
+        try:
+            ok, actual = verify_integrity(pv)
+        except OSError as e:
+            # File installer thiếu/không đọc được trên đĩa server — không để lỗi này thoát
+            # khỏi Celery task (sẽ crash task, kẹt deployment RUNNING vĩnh viễn).
+            job.status = JobStatus.FAILED
+            job.error_output = f"Không đọc được file installer để xác minh toàn vẹn: {e}"
+            job.current_step = "precheck"
+            job.finished_at = timezone.now()
+            job.save()
+            logger.error("Integrity check lỗi đọc file cho job %s (%s): %s", job_id, machine.hostname, e)
+            return {"job_id": job_id, "status": "failed", "error": "integrity_file_missing"}
         if not ok:
             job.status = JobStatus.FAILED
             job.error_output = (
@@ -252,7 +263,13 @@ def _verify_install(make_executor, plan, job):
 
 @shared_task
 def finalize_deployment(_results, deployment_id: int):
-    """Callback chord: tổng kết trạng thái deployment."""
+    """
+    Callback chord: tổng kết trạng thái deployment.
+
+    Có thể bị gọi 2 lần cho cùng 1 deployment (chord callback + lưới an toàn
+    `reconcile_stuck_deployments`) — guard bằng cách chỉ finalize khi deployment còn
+    RUNNING, và ghi bằng update() có điều kiện để tránh race giữa hai lời gọi.
+    """
     from apps.deployments.models import Deployment, DeploymentStatus
 
     try:
@@ -260,25 +277,40 @@ def finalize_deployment(_results, deployment_id: int):
     except Deployment.DoesNotExist:
         return
 
+    if deployment.status != DeploymentStatus.RUNNING:
+        logger.info(
+            "finalize_deployment: deployment %s không còn RUNNING (%s) — bỏ qua (đã "
+            "được tổng kết/hủy bởi lời gọi khác)",
+            deployment_id, deployment.status,
+        )
+        return
+
     total = deployment.total_count
     failed = deployment.failed_count
     success = deployment.success_count
 
     if total == 0:
-        deployment.status = DeploymentStatus.COMPLETED
+        new_status = DeploymentStatus.COMPLETED
     elif success == 0 and failed == 0:
         # Không thành công cũng không thất bại → mọi job đã bị hủy (reconcile sau khi
         # cancel terminate). Đánh CANCELLED thay vì COMPLETED cho đúng bản chất.
-        deployment.status = DeploymentStatus.CANCELLED
+        new_status = DeploymentStatus.CANCELLED
     elif failed == 0:
-        deployment.status = DeploymentStatus.COMPLETED
+        new_status = DeploymentStatus.COMPLETED
     elif success == 0:
-        deployment.status = DeploymentStatus.FAILED
+        new_status = DeploymentStatus.FAILED
     else:
-        deployment.status = DeploymentStatus.COMPLETED_WITH_ERRORS
+        new_status = DeploymentStatus.COMPLETED_WITH_ERRORS
 
-    deployment.finished_at = timezone.now()
-    deployment.save(update_fields=["status", "finished_at"])
+    updated = Deployment.objects.filter(
+        pk=deployment_id, status=DeploymentStatus.RUNNING
+    ).update(status=new_status, finished_at=timezone.now())
+    if not updated:
+        logger.info(
+            "finalize_deployment: deployment %s đã bị đổi trạng thái bởi lời gọi khác "
+            "giữa lúc tính toán — bỏ qua ghi đè", deployment_id,
+        )
+        return
 
     # Giải phóng bộ đếm concurrency của deployment này.
     from apps.deployments.semaphore import clear_slots

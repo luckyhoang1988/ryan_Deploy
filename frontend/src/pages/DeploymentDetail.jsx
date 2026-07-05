@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { api, listOf } from "../api";
+import { useAuth } from "../auth";
 import { StatusBadge } from "../components/Layout";
 import DeployProgress from "../components/DeployProgress";
 import { subscribe } from "../ws";
@@ -10,6 +11,8 @@ const TERMINAL = ["completed", "completed_errors", "failed", "cancelled"];
 
 export default function DeploymentDetail() {
   const { id } = useParams();
+  const { hasRole } = useAuth();
+  const canWrite = hasRole("operator", "admin");
   const [dep, setDep] = useState(null);
   const [jobs, setJobs] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -80,8 +83,12 @@ export default function DeploymentDetail() {
           <h2 style={{ margin: "6px 0" }}>{dep.name}</h2>
         </div>
         <div className="row">
-          <button className="btn ghost" onClick={retrigger}>Chạy lại</button>
-          <button className="btn danger" onClick={cancel}>Hủy</button>
+          {canWrite && (
+            <>
+              <button className="btn ghost" onClick={retrigger}>Chạy lại</button>
+              <button className="btn danger" onClick={cancel}>Hủy</button>
+            </>
+          )}
         </div>
       </div>
 

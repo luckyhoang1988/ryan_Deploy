@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass
 
 from django.conf import settings
+from django.db.models import ProtectedError
 from django.utils import timezone
 
 from .models import Machine
@@ -210,7 +211,14 @@ def sync_computers_from_ad(
 
     # Xóa máy không còn trong kết quả AD (khi đổi OU scope).
     if purge and synced_hostnames:
-        deleted_count, _ = Machine.objects.exclude(hostname__in=synced_hostnames).delete()
+        try:
+            deleted_count, _ = Machine.objects.exclude(hostname__in=synced_hostnames).delete()
+        except ProtectedError:
+            deleted_count = 0
+            logger.warning(
+                "AD sync purge: một số máy ngoài OU scope còn job liên kết, "
+                "không xóa được — bỏ qua, tiếp tục sync."
+            )
         result.deleted = deleted_count
         if deleted_count:
             logger.info("AD sync purge: đã xóa %s máy ngoài phạm vi", deleted_count)

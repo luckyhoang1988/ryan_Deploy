@@ -10,8 +10,9 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
-from .permissions import ROLE_ADMIN, IsAdminStrict, user_roles
+from .permissions import ROLE_ADMIN, IsAdminStrict, has_role, user_roles
 from .serializers import UserSerializer
+from .task_registry import get_task_owner
 
 
 class LoginThrottle(ScopedRateThrottle):
@@ -85,7 +86,15 @@ def task_status(request, task_id):
     """
     Trạng thái một Celery task (cho các tác vụ nền: sync AD, kiểm tra online...).
     Client poll đến khi `ready=true` rồi đọc `result`.
+
+    Chỉ chủ sở hữu task (user đã .delay() nó) hoặc admin mới xem được — task_id không
+    ghi nhận chủ sở hữu (cache miss/hết TTL) cũng bị từ chối với non-admin, tránh lộ
+    kết quả tác vụ nền nhạy cảm (sync AD/LDAP) cho user bất kỳ.
     """
+    owner_id = get_task_owner(task_id)
+    if not has_role(request.user, ROLE_ADMIN) and owner_id != request.user.id:
+        return Response({"detail": "Không có quyền xem tác vụ này."}, status=status.HTTP_403_FORBIDDEN)
+
     from ryandeploy.celery import app as celery_app
 
     res = celery_app.AsyncResult(task_id)
@@ -125,10 +134,12 @@ def stats(request):
 @permission_classes([IsAuthenticated])
 def server_stats(request):
     """CPU/RAM/Disk real-time của chính máy server (host chạy backend)."""
+    import os
+
     import psutil
 
     vm = psutil.virtual_memory()
-    disk = psutil.disk_usage("/")
+    disk = psutil.disk_usage("C:\\" if os.name == "nt" else "/")
     return Response(
         {
             "cpu_percent": psutil.cpu_percent(interval=0.1),

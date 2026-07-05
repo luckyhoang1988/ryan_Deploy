@@ -156,6 +156,7 @@ def test_cancel_revokes_with_terminate(package_version, credential, monkeypatch)
 
 def test_finalize_all_cancelled_is_cancelled(package_version, credential):
     dep = _make_deployment(package_version, credential, "AllCancel", [JobStatus.CANCELLED, JobStatus.CANCELLED])
+    Deployment.objects.filter(id=dep.id).update(status=DeploymentStatus.RUNNING)
     finalize_deployment(None, dep.id)
     dep.refresh_from_db()
     assert dep.status == DeploymentStatus.CANCELLED

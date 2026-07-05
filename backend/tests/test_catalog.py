@@ -110,10 +110,23 @@ class _FakeResp:
         return False
 
 
+class _FakeOpener:
+    """Giả `build_opener(...)`: chỉ cần `.open(req, timeout=...)` trả `_FakeResp`."""
+
+    def __init__(self, data: bytes, headers=None):
+        self._data = data
+        self._headers = headers
+
+    def open(self, req, timeout=None):
+        return _FakeResp(self._data, self._headers)
+
+
 def _patch_urlopen(monkeypatch, data: bytes, headers=None):
-    monkeypatch.setattr(
-        downloader, "urlopen", lambda req, timeout=None: _FakeResp(data, headers)
-    )
+    # Không dùng urlopen trực tiếp nữa (SSRF fix dùng build_opener + redirect handler
+    # tùy chỉnh) — patch build_opener để trả fake opener. Cũng bỏ qua DNS thật (host
+    # "example.com" không cần resolve mạng thật trong test đơn vị).
+    monkeypatch.setattr(downloader, "build_opener", lambda *a, **k: _FakeOpener(data, headers))
+    monkeypatch.setattr(downloader, "_ensure_public_host", lambda hostname: None)
 
 
 def test_fetch_creates_version(db, settings, tmp_path, monkeypatch):

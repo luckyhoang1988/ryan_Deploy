@@ -161,6 +161,23 @@ class DeploymentViewSet(viewsets.ModelViewSet):
             target=deployment,
             job_count=job_count,
         )
+
+        if job_count == 0:
+            # resolve_targets() (áp targeting_rule) lọc hết máy đích — không có gì để chạy.
+            # Đóng lại tránh kẹt ở trạng thái trước đó, và báo rõ thay vì "Đã kích hoạt."
+            # gây hiểu lầm với jobs: 0 (giống correction đã có ở beat path — tasks.py).
+            deployment.status = DeploymentStatus.COMPLETED
+            deployment.finished_at = timezone.now()
+            deployment.save(update_fields=["status", "finished_at"])
+            return Response(
+                {
+                    "detail": "Không có máy đích hợp lệ sau khi áp targeting rule — không có job nào được tạo.",
+                    "jobs": 0,
+                    "status": deployment.status,
+                },
+                status=status.HTTP_200_OK,
+            )
+
         return Response(
             {"detail": "Đã kích hoạt.", "jobs": job_count, "status": deployment.status},
             status=status.HTTP_202_ACCEPTED,
@@ -183,6 +200,14 @@ class DeploymentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):
         deployment = self.get_object()
+        if deployment.status not in (DeploymentStatus.SCHEDULED, DeploymentStatus.RUNNING):
+            return Response(
+                {
+                    "detail": f"Không thể hủy deployment ở trạng thái "
+                              f"'{deployment.get_status_display()}'."
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
         cancel_deployment(deployment)
         deployment.status = DeploymentStatus.CANCELLED
         deployment.finished_at = timezone.now()

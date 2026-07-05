@@ -10,6 +10,7 @@ from rest_framework.views import APIView
 
 from apps.audit.models import AuditLog
 from apps.core.permissions import IsAdmin, IsOperatorOrAbove
+from apps.core.task_registry import remember_task_owner
 
 from . import updates as updates_svc
 from .models import APPROVED_VERSIONS_ATTR, Package, PackageDownload, PackageFolder, PackageVersion
@@ -83,6 +84,7 @@ class PackageViewSet(viewsets.ModelViewSet):
         from .tasks import fetch_package_version
 
         task = fetch_package_version.delay(package.id, url, version, request.user.id)
+        remember_task_owner(task.id, request.user.id)
         return Response(
             {"detail": "Đang tải trong nền.", "task_id": task.id},
             status=status.HTTP_202_ACCEPTED,

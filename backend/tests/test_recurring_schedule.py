@@ -170,6 +170,24 @@ def test_trigger_due_schedules_launch_error_marks_failed(schedule, monkeypatch):
     assert dep.status == DeploymentStatus.FAILED
 
 
+def test_trigger_due_schedules_launch_error_reverts_last_triggered(schedule, monkeypatch):
+    # Trước fix: last_triggered_at bị ghi NGAY dù launch fail → mất nguyên 1 chu kỳ.
+    # Sau fix: revert lại giá trị cũ để lịch được thử lại ở tick kế tiếp.
+    previous = timezone.now() - timedelta(minutes=61)
+    schedule.last_triggered_at = previous
+    schedule.save()
+
+    def boom(d):
+        raise RuntimeError("broker down")
+
+    monkeypatch.setattr(dep_tasks, "launch_deployment", boom)
+    dep_tasks.trigger_due_schedules()
+
+    schedule.refresh_from_db()
+    assert schedule.last_triggered_at == previous
+    assert schedule.is_due(timezone.now()) is True
+
+
 def test_trigger_due_schedules_no_machines_completes(schedule, monkeypatch):
     schedule.target_machines.clear()
     monkeypatch.setattr(dep_tasks, "launch_deployment", lambda d: 0)

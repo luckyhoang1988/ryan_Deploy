@@ -6,11 +6,13 @@ Dùng `urllib.request` (stdlib) — project không có `requests`, và pin crypt
 (do impacket) khiến việc thêm dep là rủi ro. Chỉ admin được gọi (SSRF surface): validate
 scheme http/https, trần dung lượng, timeout.
 """
+import ipaddress
 import logging
 import os
+import socket
 import tempfile
 from urllib.parse import unquote, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from django.conf import settings
 from django.core.files import File
@@ -32,6 +34,35 @@ _USER_AGENT = "RyanDeploy/1.0 (+package-catalog)"
 
 class DownloadError(Exception):
     """Lỗi tải/khởi tạo version — thông điệp an toàn để trả về client."""
+
+
+def _ensure_public_host(hostname: str) -> None:
+    """
+    Chặn SSRF: resolve hostname, từ chối nếu BẤT KỲ IP nào rơi vào dải nội bộ/đặc biệt
+    (loopback, link-local — gồm 169.254.169.254 cloud metadata, RFC1918 private,
+    reserved, multicast). Admin-only nhưng vẫn là bề mặt SSRF nên phải chặn cứng.
+    """
+    if not hostname:
+        raise DownloadError("URL thiếu hostname.")
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except socket.gaierror as exc:
+        raise DownloadError(f"Không resolve được host '{hostname}': {exc}") from exc
+    for _family, _type, _proto, _canon, sockaddr in infos:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            raise DownloadError(
+                f"URL trỏ tới địa chỉ nội bộ/đặc biệt ({ip}) — không cho phép (chống SSRF)."
+            )
+
+
+class _SafePublicOnlyRedirectHandler(HTTPRedirectHandler):
+    """Re-kiểm tra host của URL đích trước khi cho phép redirect — chặn bypass SSRF qua
+    redirect (server công khai redirect sang IP nội bộ sau khi qua check ban đầu)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _ensure_public_host(urlparse(newurl).hostname)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _filename_from(url: str, content_disposition: str) -> str:
@@ -56,10 +87,13 @@ def _filename_from(url: str, content_disposition: str) -> str:
 def _stream_to_temp(url: str, max_bytes: int, timeout: int) -> tuple[str, str]:
     """Tải URL ra file tạm với trần dung lượng. Trả (temp_path, filename)."""
     req = Request(url, headers={"User-Agent": _USER_AGENT})
+    opener = build_opener(_SafePublicOnlyRedirectHandler)
     fd, temp_path = tempfile.mkstemp(prefix="ryandeploy_dl_")
     written = 0
     try:
-        with urlopen(req, timeout=timeout) as resp:  # noqa: S310 (scheme đã validate)
+        # noqa: S310 — scheme đã validate ở fetch(), host (kể cả sau redirect) được
+        # _SafePublicOnlyRedirectHandler + _ensure_public_host chặn SSRF.
+        with opener.open(req, timeout=timeout) as resp:
             filename = _filename_from(url, resp.headers.get("Content-Disposition", ""))
             with os.fdopen(fd, "wb") as out:
                 while True:
@@ -103,9 +137,11 @@ def fetch(package, url: str, version: str, requested_by=None) -> PackageDownload
     - Dedup theo SHA-256: nếu trùng version đã có của package → status=unchanged, không tạo mới.
     - Trả về bản ghi PackageDownload (đã lưu) phản ánh kết quả.
     """
-    scheme = urlparse(url).scheme.lower()
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
     if scheme not in ("http", "https"):
         raise DownloadError("URL phải dùng scheme http hoặc https.")
+    _ensure_public_host(parsed.hostname)
 
     version = (version or "").strip()
     if not version:

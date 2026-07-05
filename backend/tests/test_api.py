@@ -328,3 +328,107 @@ def test_viewer_cannot_delete_deployment(viewer_client):
     dep = _make_deployment()
     r = viewer_client.delete(f"/api/deployments/{dep.id}/")
     assert r.status_code == 403
+
+
+# --- Credential: chỉ admin đọc được (kể cả GET) ---
+
+
+def test_viewer_cannot_read_credentials(viewer_client, admin_client):
+    admin_client.post(
+        "/api/credentials/",
+        {"name": "svc", "username": "u", "password": "p"},
+        content_type="application/json",
+    )
+    r = viewer_client.get("/api/credentials/")
+    assert r.status_code == 403
+
+
+def test_operator_cannot_read_credentials(operator_client, admin_client):
+    admin_client.post(
+        "/api/credentials/",
+        {"name": "svc2", "username": "u", "password": "p"},
+        content_type="application/json",
+    )
+    r = operator_client.get("/api/credentials/")
+    assert r.status_code == 403
+
+
+def test_admin_can_read_credentials(admin_client):
+    admin_client.post(
+        "/api/credentials/",
+        {"name": "svc3", "username": "u", "password": "p"},
+        content_type="application/json",
+    )
+    r = admin_client.get("/api/credentials/")
+    assert r.status_code == 200
+
+
+# --- Job log: viewer thấy status nhưng KHÔNG thấy output/error_output ---
+
+
+def test_viewer_sees_job_status_but_not_output(viewer_client, operator_client):
+    from apps.jobs.models import Job, JobStatus
+    from apps.machines.models import Machine
+
+    dep = _make_deployment()
+    machine = Machine.objects.create(hostname="PC-LOG")
+    job = Job.objects.create(
+        deployment=dep, machine=machine, status=JobStatus.FAILED,
+        output="stdout nhạy cảm", error_output="lỗi chi tiết máy đích",
+    )
+
+    r_viewer = viewer_client.get(f"/api/jobs/?deployment={dep.id}")
+    assert r_viewer.status_code == 200
+    body = r_viewer.json()["results"] if isinstance(r_viewer.json(), dict) else r_viewer.json()
+    viewer_job = next(j for j in body if j["id"] == job.id)
+    assert viewer_job["status"] == JobStatus.FAILED
+    assert viewer_job["output"] is None
+    assert viewer_job["error_output"] is None
+
+    r_op = operator_client.get(f"/api/jobs/?deployment={dep.id}")
+    op_body = r_op.json()["results"] if isinstance(r_op.json(), dict) else r_op.json()
+    op_job = next(j for j in op_body if j["id"] == job.id)
+    assert op_job["output"] == "stdout nhạy cảm"
+    assert op_job["error_output"] == "lỗi chi tiết máy đích"
+
+
+# --- Deployment cancel: chỉ cho hủy khi SCHEDULED/RUNNING ---
+
+
+def test_cancel_completed_deployment_rejected(operator_client):
+    dep = _make_deployment(status="completed")
+    r = operator_client.post(f"/api/deployments/{dep.id}/cancel/", {}, content_type="application/json")
+    assert r.status_code == 409
+    dep.refresh_from_db()
+    assert dep.status == "completed"
+
+
+def test_cancel_draft_deployment_rejected(operator_client):
+    dep = _make_deployment(status="draft")
+    r = operator_client.post(f"/api/deployments/{dep.id}/cancel/", {}, content_type="application/json")
+    assert r.status_code == 409
+
+
+def test_cancel_running_deployment_allowed(operator_client):
+    dep = _make_deployment(status="running")
+    r = operator_client.post(f"/api/deployments/{dep.id}/cancel/", {}, content_type="application/json")
+    assert r.status_code == 200
+    dep.refresh_from_db()
+    assert dep.status == "cancelled"
+
+
+# --- purge_all: không vỡ 500 khi máy còn job liên kết (FK PROTECT) ---
+
+
+def test_purge_all_blocked_when_machine_has_job(admin_client):
+    from apps.machines.models import Machine
+
+    dep = _make_deployment()
+    machine = Machine.objects.create(hostname="PC-PROTECTED")
+    from apps.jobs.models import Job
+
+    Job.objects.create(deployment=dep, machine=machine)
+
+    r = admin_client.post("/api/machines/purge_all/", {}, content_type="application/json")
+    assert r.status_code == 409
+    assert Machine.objects.filter(id=machine.id).exists()

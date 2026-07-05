@@ -1,6 +1,7 @@
 import csv
 import io
 
+from django.db.models import ProtectedError
 from django.http import HttpResponse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -8,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.permissions import IsAdmin, IsViewerOrAbove
+from apps.core.task_registry import remember_task_owner
 
 from .ad_sync import test_ad_connection
 from .models import ADConfig, Machine, MachineGroup
@@ -71,6 +73,7 @@ class MachineViewSet(viewsets.ModelViewSet):
         search_ou = request.data.get("search_ou")
         purge = request.data.get("purge", False)
         task = sync_from_ad.delay(search_ou, request.user.id, purge)
+        remember_task_owner(task.id, request.user.id)
         return Response(
             {"detail": "Đã bắt đầu đồng bộ AD (chạy nền).", "task_id": task.id},
             status=status.HTTP_202_ACCEPTED,
@@ -79,7 +82,14 @@ class MachineViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"])
     def purge_all(self, request):
         """Xóa tất cả máy trong DB (reset trước khi sync lại với OU mới)."""
-        count, _ = Machine.objects.all().delete()
+        try:
+            count, _ = Machine.objects.all().delete()
+        except ProtectedError:
+            return Response(
+                {"detail": "Không thể xóa: một số máy còn job liên kết. Hãy xóa/hoàn tất "
+                           "các deployment liên quan trước."},
+                status=status.HTTP_409_CONFLICT,
+            )
         return Response(
             {"detail": f"Đã xóa {count} máy.", "deleted": count},
         )
@@ -88,6 +98,7 @@ class MachineViewSet(viewsets.ModelViewSet):
     def check_online(self, request):
         """Kiểm tra online toàn bộ máy (chạy nền — ping nhiều máy có thể lâu)."""
         task = check_all_online.delay()
+        remember_task_owner(task.id, request.user.id)
         return Response(
             {"detail": "Đang kiểm tra online (chạy nền).", "task_id": task.id},
             status=status.HTTP_202_ACCEPTED,

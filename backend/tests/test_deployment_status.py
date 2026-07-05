@@ -33,6 +33,8 @@ def test_success_count_includes_reboot(deployment):
 
 
 def test_finalize_all_reboot_no_fail_is_completed(deployment):
+    deployment.status = DeploymentStatus.RUNNING
+    deployment.save()
     _add_jobs(deployment, [JobStatus.SUCCESS_REBOOT, JobStatus.SUCCESS_REBOOT])
     finalize_deployment(None, deployment.id)
     deployment.refresh_from_db()
@@ -41,7 +43,34 @@ def test_finalize_all_reboot_no_fail_is_completed(deployment):
 
 def test_finalize_reboot_plus_one_fail_is_completed_with_errors(deployment):
     # Trước fix: success_count == 0 → bị đánh FAILED sai. Sau fix → COMPLETED_WITH_ERRORS.
+    deployment.status = DeploymentStatus.RUNNING
+    deployment.save()
     _add_jobs(deployment, [JobStatus.SUCCESS_REBOOT, JobStatus.SUCCESS_REBOOT, JobStatus.FAILED])
     finalize_deployment(None, deployment.id)
     deployment.refresh_from_db()
     assert deployment.status == DeploymentStatus.COMPLETED_WITH_ERRORS
+
+
+def test_finalize_not_running_is_noop(deployment):
+    # deployment mặc định DRAFT (chưa launch) → finalize không được ghi đè trạng thái.
+    _add_jobs(deployment, [JobStatus.SUCCESS])
+    finalize_deployment(None, deployment.id)
+    deployment.refresh_from_db()
+    assert deployment.status == DeploymentStatus.DRAFT
+
+
+def test_finalize_twice_is_idempotent(deployment):
+    deployment.status = DeploymentStatus.RUNNING
+    deployment.save()
+    _add_jobs(deployment, [JobStatus.SUCCESS, JobStatus.FAILED])
+    finalize_deployment(None, deployment.id)
+    deployment.refresh_from_db()
+    assert deployment.status == DeploymentStatus.COMPLETED_WITH_ERRORS
+    first_finished_at = deployment.finished_at
+
+    # Gọi lần 2 (giả lập reconcile_stuck_deployments đụng cùng deployment) không được
+    # ghi đè lại — deployment đã không còn RUNNING.
+    finalize_deployment(None, deployment.id)
+    deployment.refresh_from_db()
+    assert deployment.status == DeploymentStatus.COMPLETED_WITH_ERRORS
+    assert deployment.finished_at == first_finished_at

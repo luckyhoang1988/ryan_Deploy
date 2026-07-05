@@ -14,6 +14,42 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-05 — Vá 15 bug audit High/Medium: đảo ngược quyết định fail-open, seam mock đổi khi thêm SSRF guard
+**Bối cảnh:** Từ 1 báo cáo audit ngoài, verify + vá 15 bug (purge_all ProtectedError, credential
+lộ cho viewer, job log lộ output cho viewer, task_status không kiểm chủ sở hữu, schedule mất 1
+chu kỳ khi launch lỗi, trigger thủ công 202/jobs:0, cancel không kiểm trạng thái,
+finalize_deployment không idempotent, semaphore fail-open→fail-closed, verify_integrity
+FileNotFoundError không bắt, server_stats disk path Windows, SSRF downloader.py, 2 bug frontend).
+**Bài học:**
+1. **Đảo ngược 1 quyết định thiết kế cũ đã ghi trong LESSONS (semaphore fail-open, xem bài học
+   2026-07-03 "self.retry cho semaphore...") là hợp lệ khi có yêu cầu rõ ràng** — nhưng phải sửa
+   CẢ docstring module lẫn code (semaphore.py dòng 9-12 mô tả "Thiết kế fail-open" ngay trong
+   docstring, nếu chỉ đổi `return True`→`False` mà không sửa docstring thì lần sau đọc code sẽ
+   hiểu sai chủ đích). Bài học cũ không tự động "đúng mãi" — luôn xác nhận với người yêu cầu khi
+   đổi ngược 1 quyết định đã có lý do ghi lại, và cập nhật cả lý do bằng văn bản, không chỉ code.
+2. **Guard idempotency cho 1 hàm (`finalize_deployment`: chỉ chạy khi `deployment.status ==
+   RUNNING`) phá các test hiện có gọi thẳng hàm đó trên fixture mặc định KHÔNG set RUNNING**
+   (`test_deployment_status.py`, `test_phase2.py::test_finalize_all_cancelled_is_cancelled`) —
+   vì fixture tạo Deployment qua `Deployment.objects.create(...)` mặc định `status=DRAFT`. Thêm
+   guard theo tiền điều kiện thực tế (chord callback/reconcile chỉ gọi khi đã RUNNING) luôn phải
+   rà TOÀN BỘ nơi gọi hàm đó trong test suite, không chỉ trong production code — `grep -rn
+   "finalize_deployment("` qua cả `tests/` mới thấy hết các lời gọi trực tiếp cần set RUNNING
+   trước.
+3. **Đổi seam mock khi thay `urlopen` bằng `build_opener(...).open(...)` (để thêm
+   `HTTPRedirectHandler` tùy chỉnh chặn SSRF qua redirect):** test cũ patch thẳng
+   `downloader.urlopen` (`test_catalog.py`) sẽ vỡ với `AttributeError` vì tên đó không còn tồn
+   tại trong module. Phải đổi mock sang patch `downloader.build_opener` (trả 1 fake opener có
+   `.open(req, timeout=...)`), và **cũng phải mock `downloader._ensure_public_host` thành no-op**
+   cho các test không liên quan tới SSRF (dùng host giả `example.com`) — nếu không, test đơn vị
+   sẽ âm thầm gọi `socket.getaddrinfo` thật (network call trong unit test, dễ flaky/chậm trên CI
+   không có mạng).
+**Áp dụng:** Khi đảo ngược 1 quyết định kỹ thuật cũ có ghi chú lý do → sửa đồng thời code +
+docstring/comment giải thích lý do MỚI. Khi thêm guard theo trạng thái vào 1 hàm được gọi ở
+nhiều nơi (task callback + lưới an toàn) → `grep` cả `tests/` để tìm lời gọi trực tiếp cần cập
+nhật fixture. Khi đổi API gọi mạng (`urlopen`→`build_opener`) → cập nhật lại toàn bộ chỗ test
+mock tên hàm cũ, và mock luôn các hàm validate mới (DNS/SSRF check) để test đơn vị không chạm
+mạng thật.
+
 ## 2026-07-04 — Verify UI bằng CDP thô khi không có chromium-cli/Playwright (Windows)
 **Bối cảnh:** Thêm Gauge CPU/RAM real-time vào Dashboard, cần "chạy thật trong trình duyệt"
 nhưng máy Windows này không có `chromium-cli` lẫn Python `playwright` (chưa cài, tải browser

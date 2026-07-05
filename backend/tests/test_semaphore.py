@@ -1,5 +1,6 @@
 """Semaphore concurrency per-deployment (đếm slot trên Redis, fake trong test)."""
 import pytest
+import redis
 
 from apps.deployments import semaphore
 
@@ -69,3 +70,12 @@ def test_limit_zero_is_unlimited(fake_redis):
     # max_concurrency <= 0 → không giới hạn
     for _ in range(100):
         assert semaphore.acquire_slot(1, limit=0, ttl=60) is True
+
+
+def test_acquire_redis_error_fails_closed(fake_redis, monkeypatch):
+    # Redis lỗi → từ chối slot (fail-closed), KHÔNG cấp slot mặc định (fail-open cũ).
+    def boom(k):
+        raise redis.RedisError("connection refused")
+
+    monkeypatch.setattr(fake_redis, "incr", boom)
+    assert semaphore.acquire_slot(1, limit=5, ttl=60) is False
