@@ -343,3 +343,59 @@ label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px
   font-size: 14px;
 }
 
+/* Trang Hướng dẫn sử dụng */
+.guide-toc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin-bottom: 24px;
+}
+.guide-toc a { font-size: 13px; color: var(--text); }
+.guide-toc a:hover { color: var(--accent); }
+.guide-doc { max-width: 880px; }
+.guide-doc h2 {
+  margin: 32px 0 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  font-size: 20px;
+}
+.guide-doc section:first-of-type h2 { margin-top: 0; padding-top: 0; border-top: none; }
+.guide-doc h3 { margin: 18px 0 8px; font-size: 15px; color: var(--accent); }
+.guide-doc p { line-height: 1.65; }
+.guide-doc ul, .guide-doc ol { line-height: 1.75; padding-left: 22px; }
+.guide-doc li { margin-bottom: 4px; }
+.guide-doc table { margin: 10px 0 20px; }
+.guide-doc code {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 12.5px;
+}
+.guide-note {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13.5px;
+  margin: 12px 0;
+}
+
+@media print {
+  body { background: #fff !important; color: #000 !important; }
+  .sidebar, .topbar, .no-print { display: none !important; }
+  .content { padding: 0 !important; }
+  .guide-doc { max-width: none; color: #000; }
+  .guide-doc h2, .guide-doc h3 { color: #000; }
+  .guide-doc h2 { border-top-color: #ccc; }
+  .guide-doc table { background: #fff; }
+  .guide-doc th, .guide-doc td { border-color: #ccc; color: #000; }
+  .guide-doc code { background: #f2f2f2; border-color: #ccc; color: #000; }
+  .guide-note { background: #fff; border-color: #999; }
+  .guide-section { page-break-inside: avoid; }
+}
+

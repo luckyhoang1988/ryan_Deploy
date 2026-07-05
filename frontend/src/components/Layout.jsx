@@ -13,6 +13,7 @@ const NAV = [
   { to: "/deployments", label: "Deployments", icon: "send" },
   { to: "/schedules", label: "Lịch lặp", icon: "clock" },
   { to: "/updates", label: "Cập nhật", icon: "refreshCw" },
+  { to: "/guide", label: "Hướng dẫn", icon: "book" },
 ];
 
 export default function Layout({ children }) {
