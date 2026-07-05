@@ -7,6 +7,7 @@ finalize_deployment(_, deployment_id): tổng kết trạng thái deployment sau
 import logging
 
 from celery import shared_task
+from django.db.models import F
 from django.utils import timezone
 
 from apps.core.realtime.broadcast import broadcast_job_step
@@ -56,13 +57,33 @@ def deploy_to_machine(self, job_id: int):
         release_slot(deployment.id)
 
 
+def _write_job_result(job, **fields) -> bool:
+    """
+    Ghi kết quả cuối (SUCCESS/FAILED/QUEUED-retry) bằng UPDATE có điều kiện, loại trừ job
+    đã CANCELLED — tránh lost update khi cancel_deployment() ghi CANCELLED đúng lúc
+    executor.run() vừa xong (cửa sổ giữa refresh_from_db check và save() cũ).
+    """
+    updated = Job.objects.filter(pk=job.pk).exclude(status=JobStatus.CANCELLED).update(**fields)
+    if updated:
+        for k, v in fields.items():
+            setattr(job, k, v)
+    return bool(updated)
+
+
 def _run_job(self, job, deployment, machine, credential, pv):
     job_id = job.pk
-    job.status = JobStatus.RUNNING
-    job.attempts += 1
-    job.started_at = job.started_at or timezone.now()
-    job.celery_task_id = self.request.id or ""
-    job.save(update_fields=["status", "attempts", "started_at", "celery_task_id"])
+    # Claim nguyên tử: chỉ chạy nếu job còn QUEUED — chặn trường hợp cancel_deployment()
+    # đã đặt CANCELLED giữa lúc job chờ slot/hàng đợi và lúc worker thực sự bắt đầu chạy.
+    claimed = Job.objects.filter(pk=job_id, status=JobStatus.QUEUED).update(
+        status=JobStatus.RUNNING,
+        attempts=F("attempts") + 1,
+        started_at=job.started_at or timezone.now(),
+        celery_task_id=self.request.id or "",
+    )
+    if not claimed:
+        logger.info("Job %s không còn QUEUED — bỏ qua chạy (đã bị hủy?)", job_id)
+        return {"job_id": job_id, "status": "cancelled"}
+    job.refresh_from_db()
 
     from apps.audit.models import AuditLog
 
@@ -85,22 +106,26 @@ def _run_job(self, job, deployment, machine, credential, pv):
         except OSError as e:
             # File installer thiếu/không đọc được trên đĩa server — không để lỗi này thoát
             # khỏi Celery task (sẽ crash task, kẹt deployment RUNNING vĩnh viễn).
-            job.status = JobStatus.FAILED
-            job.error_output = f"Không đọc được file installer để xác minh toàn vẹn: {e}"
-            job.current_step = "precheck"
-            job.finished_at = timezone.now()
-            job.save()
+            _write_job_result(
+                job,
+                status=JobStatus.FAILED,
+                error_output=f"Không đọc được file installer để xác minh toàn vẹn: {e}",
+                current_step="precheck",
+                finished_at=timezone.now(),
+            )
             logger.error("Integrity check lỗi đọc file cho job %s (%s): %s", job_id, machine.hostname, e)
             return {"job_id": job_id, "status": "failed", "error": "integrity_file_missing"}
         if not ok:
-            job.status = JobStatus.FAILED
-            job.error_output = (
-                f"Toàn vẹn installer KHÔNG khớp — SHA-256 mong đợi {pv.sha256}, thực tế {actual}. "
-                "Nghi ngờ file bị sửa đổi. Hủy đẩy."
+            _write_job_result(
+                job,
+                status=JobStatus.FAILED,
+                error_output=(
+                    f"Toàn vẹn installer KHÔNG khớp — SHA-256 mong đợi {pv.sha256}, thực tế {actual}. "
+                    "Nghi ngờ file bị sửa đổi. Hủy đẩy."
+                ),
+                current_step="precheck",
+                finished_at=timezone.now(),
             )
-            job.current_step = "precheck"
-            job.finished_at = timezone.now()
-            job.save()
             logger.error("Integrity FAIL cho job %s (%s)", job_id, machine.hostname)
             return {"job_id": job_id, "status": "failed", "error": "integrity_mismatch"}
 
@@ -147,12 +172,14 @@ def _run_job(self, job, deployment, machine, credential, pv):
         logger.info("Job %s bị hủy trong lúc chạy — dừng", job_id)
         return {"job_id": job_id, "status": "cancelled"}
 
-    # --- Ghi kết quả ---
-    job.exit_code = result.exit_code
-    job.output = "\n".join(result.log) + ("\n\n--- STDOUT ---\n" + result.stdout if result.stdout else "")
-    job.error_output = result.error
-    job.current_step = result.step_reached
-    job.finished_at = timezone.now()
+    # --- Ghi kết quả (gộp vào UPDATE có điều kiện bên dưới, chưa lưu DB ở đây) ---
+    base_fields = {
+        "exit_code": result.exit_code,
+        "output": "\n".join(result.log) + ("\n\n--- STDOUT ---\n" + result.stdout if result.stdout else ""),
+        "error_output": result.error,
+        "current_step": result.step_reached,
+        "finished_at": timezone.now(),
+    }
 
     if result.success:
         # Hậu xử lý theo action (vd inventory: parse stdout → lưu InstalledSoftware).
@@ -166,10 +193,10 @@ def _run_job(self, job, deployment, machine, credential, pv):
         # --- Hậu kiểm cài đặt (chống "false success": installer trả 0 nhưng không cài) ---
         verify_err = _verify_install(make_executor, plan, job)
         if verify_err:
-            job.status = JobStatus.FAILED
-            job.error_output = verify_err
-            job.current_step = "verify"
-            job.save()
+            fields = {**base_fields, "status": JobStatus.FAILED, "error_output": verify_err, "current_step": "verify"}
+            if not _write_job_result(job, **fields):
+                logger.info("Job %s bị hủy đúng lúc hậu kiểm — bỏ qua ghi FAILED", job_id)
+                return {"job_id": job_id, "status": "cancelled"}
             AuditLog.record(
                 AuditLog.Action.JOB_FINISH,
                 target=job,
@@ -180,8 +207,10 @@ def _run_job(self, job, deployment, machine, credential, pv):
             logger.warning("Hậu kiểm FAIL job %s (%s): %s", job_id, machine.hostname, verify_err)
             return {"job_id": job_id, "status": "failed", "error": "verify_failed"}
 
-        job.status = JobStatus.SUCCESS_REBOOT if result.needs_reboot else JobStatus.SUCCESS
-        job.save()
+        success_status = JobStatus.SUCCESS_REBOOT if result.needs_reboot else JobStatus.SUCCESS
+        if not _write_job_result(job, status=success_status, **base_fields):
+            logger.info("Job %s bị hủy đúng lúc chạy xong — bỏ qua ghi thành công", job_id)
+            return {"job_id": job_id, "status": "cancelled"}
         AuditLog.record(
             AuditLog.Action.JOB_FINISH,
             target=job,
@@ -197,14 +226,16 @@ def _run_job(self, job, deployment, machine, credential, pv):
     # result.retryable=False cho lỗi chắc chắn không tự khỏi (vd sai credential) → không retry.
     transient = result.step_reached in _TRANSIENT_STEPS and result.retryable
     if transient and job.attempts <= deployment.retry_limit:
-        job.status = JobStatus.QUEUED
-        job.save()
+        if not _write_job_result(job, status=JobStatus.QUEUED, **base_fields):
+            logger.info("Job %s bị hủy đúng lúc xét retry — bỏ qua", job_id)
+            return {"job_id": job_id, "status": "cancelled"}
         countdown = 30 * (2 ** (job.attempts - 1))  # backoff 30s, 60s, 120s...
         logger.info("Retry job %s sau %ss (transient: %s)", job_id, countdown, result.error)
         raise self.retry(countdown=countdown, exc=ExecutorError(result.error))
 
-    job.status = JobStatus.FAILED
-    job.save()
+    if not _write_job_result(job, status=JobStatus.FAILED, **base_fields):
+        logger.info("Job %s bị hủy đúng lúc ghi thất bại — bỏ qua", job_id)
+        return {"job_id": job_id, "status": "cancelled"}
     AuditLog.record(
         AuditLog.Action.JOB_FINISH,
         target=job,

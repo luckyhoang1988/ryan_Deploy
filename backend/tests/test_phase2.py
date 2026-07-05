@@ -179,6 +179,48 @@ def test_updating_other_field_does_not_touch_is_online(admin_client):
     assert m.is_online is True
 
 
+# ---------------- 2.2b trigger/cancel: claim nguyên tử chỉ 1 caller thắng ----------------
+
+
+def test_trigger_atomic_claim_only_one_caller_wins(package_version, credential):
+    # Audit finding "Race condition trigger thủ công": 2 request POST /trigger/ đồng thời
+    # (double-click) không được cùng chuyển deployment sang RUNNING. Test trực tiếp câu
+    # UPDATE có điều kiện dùng trong views.py (mô phỏng 2 caller race nhau) — không dựng
+    # thread thật vì SQLite test không chịu được ghi đa luồng (xem LESSONS.md).
+    dep = Deployment.objects.create(name="D", package_version=package_version, credential=credential)
+
+    first = (
+        Deployment.objects.filter(pk=dep.pk)
+        .exclude(status=DeploymentStatus.RUNNING)
+        .update(status=DeploymentStatus.RUNNING)
+    )
+    second = (
+        Deployment.objects.filter(pk=dep.pk)
+        .exclude(status=DeploymentStatus.RUNNING)
+        .update(status=DeploymentStatus.RUNNING)
+    )
+
+    assert (first, second) == (1, 0)
+
+
+def test_cancel_atomic_claim_only_one_caller_wins(package_version, credential):
+    dep = _make_deployment(package_version, credential, "D2", [JobStatus.RUNNING])
+    Deployment.objects.filter(pk=dep.pk).update(status=DeploymentStatus.RUNNING)
+
+    first = (
+        Deployment.objects.filter(
+            pk=dep.pk, status__in=[DeploymentStatus.SCHEDULED, DeploymentStatus.RUNNING]
+        ).update(status=DeploymentStatus.CANCELLED)
+    )
+    second = (
+        Deployment.objects.filter(
+            pk=dep.pk, status__in=[DeploymentStatus.SCHEDULED, DeploymentStatus.RUNNING]
+        ).update(status=DeploymentStatus.CANCELLED)
+    )
+
+    assert (first, second) == (1, 0)
+
+
 # ---------------- 2.3 cancel terminate ----------------
 
 
@@ -199,6 +241,65 @@ def test_cancel_revokes_with_terminate(package_version, credential, monkeypatch)
     assert calls == [("task-abc", {"terminate": True})]
     job.refresh_from_db()
     assert job.status == JobStatus.CANCELLED
+
+
+def test_cancel_deployment_does_not_overwrite_job_finished_concurrently(
+    package_version, credential, monkeypatch
+):
+    # Audit finding "Cancel bị ghi đè bởi RUNNING": trước fix, cancel_deployment() đọc
+    # danh sách job "chưa kết thúc" rồi ghi CANCELLED vô điều kiện — nếu 1 worker khác
+    # ghi SUCCESS đúng lúc đang lặp (vd ngay trong lúc revoke()), CANCELLED sẽ ghi đè
+    # SUCCESS. Sau fix: UPDATE có điều kiện loại trừ job đã terminal → không ghi đè.
+    dep = _make_deployment(package_version, credential, "RaceCancel", [JobStatus.RUNNING])
+    job = dep.jobs.first()
+    job.celery_task_id = "task-race"
+    job.save(update_fields=["celery_task_id"])
+
+    from ryandeploy.celery import app
+
+    def fake_revoke(tid, **kw):
+        # Giả lập worker khác vừa ghi xong SUCCESS đúng lúc cancel_deployment() đang xử lý
+        # job này (cửa sổ giữa lúc build danh sách "pending" và lúc ghi CANCELLED).
+        Job.objects.filter(pk=job.pk).update(status=JobStatus.SUCCESS, finished_at=None)
+
+    monkeypatch.setattr(app.control, "revoke", fake_revoke)
+    monkeypatch.setattr(orchestrator, "clear_slots", lambda _id: None)
+
+    count = orchestrator.cancel_deployment(dep)
+
+    job.refresh_from_db()
+    assert job.status == JobStatus.SUCCESS  # KHÔNG bị lật ngược thành CANCELLED
+    assert count == 0
+
+
+def test_write_job_result_skips_when_job_already_cancelled(package_version, credential):
+    # Audit finding "Cancel bị ghi đè bởi RUNNING": _run_job trước fix ghi SUCCESS/FAILED
+    # vô điều kiện sau executor.run(), có thể ghi đè CANCELLED do cancel_deployment() vừa
+    # đặt. _write_job_result() phải từ chối ghi khi job đã CANCELLED.
+    from apps.jobs.tasks import _write_job_result
+
+    dep = _make_deployment(package_version, credential, "RaceRunJob", [JobStatus.RUNNING])
+    job = dep.jobs.first()
+    Job.objects.filter(pk=job.pk).update(status=JobStatus.CANCELLED)
+
+    ok = _write_job_result(job, status=JobStatus.SUCCESS, exit_code=0)
+
+    assert ok is False
+    job.refresh_from_db()
+    assert job.status == JobStatus.CANCELLED
+
+
+def test_write_job_result_writes_when_not_cancelled(package_version, credential):
+    from apps.jobs.tasks import _write_job_result
+
+    dep = _make_deployment(package_version, credential, "NoRaceRunJob", [JobStatus.RUNNING])
+    job = dep.jobs.first()
+
+    ok = _write_job_result(job, status=JobStatus.SUCCESS, exit_code=0)
+
+    assert ok is True
+    job.refresh_from_db()
+    assert job.status == JobStatus.SUCCESS
 
 
 # ---------------- 2.4 finalize all-cancelled + reconcile ----------------

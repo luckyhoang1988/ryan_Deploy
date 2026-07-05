@@ -18,6 +18,32 @@ from apps.packages.models import (
 )
 
 
+# ==================== _ensure_public_host (SSRF guard) ====================
+
+
+@pytest.mark.parametrize(
+    "hostname",
+    [
+        "127.0.0.1",
+        "169.254.169.254",  # cloud metadata
+        "10.0.0.5",
+        "::1",
+        # IPv4-mapped IPv6 — hardening chiều sâu, không dựa hoàn toàn vào việc stdlib
+        # ipaddress của MỌI phiên bản Python đều tự phân loại đúng dạng địa chỉ này.
+        "::ffff:127.0.0.1",
+        "::ffff:169.254.169.254",
+        "::ffff:10.0.0.5",
+    ],
+)
+def test_ensure_public_host_blocks_internal_addresses(hostname):
+    with pytest.raises(downloader.DownloadError):
+        downloader._ensure_public_host(hostname)
+
+
+def test_ensure_public_host_allows_public_address():
+    downloader._ensure_public_host("8.8.8.8")  # không raise
+
+
 # ==================== is_outdated ====================
 
 

@@ -67,23 +67,24 @@ def cancel_deployment(deployment) -> int:
     """Đánh dấu các job chưa kết thúc là CANCELLED và revoke task."""
     from ryandeploy.celery import app
 
-    pending = deployment.jobs.exclude(
-        status__in=[
-            JobStatus.SUCCESS,
-            JobStatus.SUCCESS_REBOOT,
-            JobStatus.FAILED,
-            JobStatus.CANCELLED,
-        ]
-    )
+    terminal = [
+        JobStatus.SUCCESS,
+        JobStatus.SUCCESS_REBOOT,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+    ]
+    pending = list(deployment.jobs.exclude(status__in=terminal))
+    now = timezone.now()
     count = 0
     for job in pending:
         if job.celery_task_id:
             # terminate=True: giết cả job ĐANG cài dở (SIGTERM) chứ không chỉ chặn job
             # chưa khởi chạy — hủy deployment phải dừng được cài đặt đang diễn ra.
             app.control.revoke(job.celery_task_id, terminate=True)
-        job.status = JobStatus.CANCELLED
-        job.finished_at = timezone.now()
-        job.save(update_fields=["status", "finished_at"])
-        count += 1
+        # UPDATE có điều kiện (không phải read-rồi-save) để không ghi đè job vừa được
+        # _run_job chuyển sang SUCCESS/FAILED đúng lúc đang lặp qua danh sách này.
+        count += Job.objects.filter(pk=job.pk).exclude(status__in=terminal).update(
+            status=JobStatus.CANCELLED, finished_at=now
+        )
     clear_slots(deployment.id)
     return count

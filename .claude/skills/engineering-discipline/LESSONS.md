@@ -14,6 +14,37 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-05 — Verify lại 1 review ngoài: IsOperatorOrAbove không chặn được GET, test concurrency thật không khả thi trên SQLite
+**Bối cảnh:** User đưa 1 báo cáo review liệt kê 4 bug (race condition trigger/cancel, viewer
+đọc audit log, SSRF IPv4-mapped IPv6) yêu cầu kiểm chứng lại trước khi vá. 3/4 xác nhận đúng,
+1/4 (SSRF) không xác nhận được là lỗ hổng thật trên Python 3.12 hiện tại.
+**Bài học:**
+1. **`IsOperatorOrAbove` (và `IsViewerOrAbove`) bỏ qua kiểm tra role hoàn toàn cho
+   `SAFE_METHODS`** (`if request.method in SAFE_METHODS: return bool(authenticated)` — không
+   gọi `has_role`). Với 1 `ReadOnlyModelViewSet` (mọi action đều GET), gắn `permission_classes
+   = [IsOperatorOrAbove]` KHÔNG có tác dụng gì khác `IsViewerOrAbove` mặc định — vẫn cho MỌI
+   user đã đăng nhập đọc. Review gốc đề xuất dùng class này để chặn viewer khỏi audit log là
+   sai — chỉ `IsAdminStrict` (role check cho MỌI method, không có nhánh SAFE_METHODS) mới thực
+   sự chặn được GET theo role. Trước khi áp dụng đề xuất "dùng permission class X" cho 1
+   ReadOnlyModelViewSet, phải đọc code của X xem có nhánh SAFE_METHODS hay không.
+2. **Không thể test concurrency thật (race condition) trên SQLite test DB** (đã ghi ở bài học
+   2026-07-03 cho ThreadPoolExecutor, nay áp dụng cả cho request đồng thời). Cách verify race
+   fix mà không cần thread thật: (a) gọi 2 lần liên tiếp CHÍNH câu `.filter(...).exclude(status=
+   RUNNING).update(...)` dùng trong view, assert lần đầu trả về 1 dòng bị update, lần hai trả
+   0 — chứng minh đúng ngữ nghĩa "chỉ 1 caller thắng" của bản thân câu SQL, không cần dựng race
+   thật; (b) với race "ghi đè do đọc-rồi-save", monkeypatch 1 side-effect (vd `revoke()`) để tự
+   thay đổi trạng thái DB ngay giữa hàm đang test — mô phỏng đúng cửa sổ race mà code cũ sẽ ghi
+   đè còn code mới (UPDATE có điều kiện) sẽ bỏ qua.
+3. Khi 1 finding không xác nhận được trên runtime hiện tại (SSRF IPv4-mapped IPv6 — code không
+   dùng `is_global` như review giả định, và `ipaddress` Python 3.12 đã tự phân loại đúng) vẫn
+   nên hỏi user có muốn thêm hardening chiều sâu hay bỏ qua, thay vì tự quyết định — không phải
+   bug nhưng có thể là quyết định đáng để user biết và chọn.
+**Áp dụng:** Luôn đọc implementation của permission class được đề xuất (đặc biệt nhánh
+SAFE_METHODS) trước khi áp dụng cho ReadOnlyModelViewSet. Test race condition bằng cách gọi
+trực tiếp câu UPDATE có điều kiện 2 lần liên tiếp (không cần thread), hoặc monkeypatch side-
+effect để mô phỏng đúng cửa sổ race. Finding không xác nhận được trên runtime hiện tại → báo
+rõ + hỏi user trước khi quyết định sửa hay bỏ qua.
+
 ## 2026-07-05 — check_all_online: rò kết nối DB trong ThreadPoolExecutor + is_online đứng hình khi disable máy
 **Bối cảnh:** Review cơ chế xác định máy online (`apps/machines/tasks.py::check_all_online`,
 Celery beat 15 phút, `ThreadPoolExecutor(max_workers=32)` gọi `refresh_machine_status` — có

@@ -1,5 +1,6 @@
 import logging
 
+from django.db import transaction
 from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -141,6 +142,21 @@ class DeploymentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_202_ACCEPTED,
             )
 
+        # Claim nguyên tử: chỉ đúng 1 request đổi được trạng thái sang RUNNING. Chặn race
+        # 2 request POST /trigger/ đồng thời (double-click) cùng vượt qua check ở trên rồi
+        # cùng gọi launch_deployment → chord kép cho cùng 1 deployment.
+        with transaction.atomic():
+            claimed = (
+                Deployment.objects.filter(pk=deployment.pk)
+                .exclude(status=DeploymentStatus.RUNNING)
+                .update(status=DeploymentStatus.RUNNING, started_at=timezone.now())
+            )
+        if not claimed:
+            return Response(
+                {"detail": "Deployment đang chạy."}, status=status.HTTP_409_CONFLICT
+            )
+        deployment.refresh_from_db()
+
         # launch_deployment có thể ném lỗi (broker/DB) sau khi đã đặt RUNNING → revert
         # về FAILED để không kẹt, và báo lỗi rõ cho client thay vì 500 trần trụi.
         try:
@@ -200,7 +216,17 @@ class DeploymentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):
         deployment = self.get_object()
-        if deployment.status not in (DeploymentStatus.SCHEDULED, DeploymentStatus.RUNNING):
+        # Claim nguyên tử: chỉ đúng 1 request đổi được SCHEDULED/RUNNING → CANCELLED, tránh
+        # hủy 2 lần chồng chéo hoặc hủy đúng lúc finalize_deployment đang tổng kết.
+        with transaction.atomic():
+            claimed = (
+                Deployment.objects.filter(
+                    pk=deployment.pk,
+                    status__in=[DeploymentStatus.SCHEDULED, DeploymentStatus.RUNNING],
+                ).update(status=DeploymentStatus.CANCELLED, finished_at=timezone.now())
+            )
+        deployment.refresh_from_db()
+        if not claimed:
             return Response(
                 {
                     "detail": f"Không thể hủy deployment ở trạng thái "
@@ -209,9 +235,6 @@ class DeploymentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_409_CONFLICT,
             )
         cancel_deployment(deployment)
-        deployment.status = DeploymentStatus.CANCELLED
-        deployment.finished_at = timezone.now()
-        deployment.save(update_fields=["status", "finished_at"])
         AuditLog.record(
             AuditLog.Action.DEPLOYMENT_CANCEL, user=request.user, target=deployment
         )

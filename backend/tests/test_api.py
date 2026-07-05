@@ -107,6 +107,21 @@ def test_admin_delete_credential_audited(admin_client):
     ).exists()
 
 
+def test_viewer_cannot_read_audit_logs(viewer_client):
+    # Audit finding "Viewer đọc audit log": AuditLogViewSet giờ Tier-0 (IsAdminStrict) —
+    # viewer/operator không còn đọc được (log chứa chi tiết nhạy cảm: tên credential,
+    # lỗi job, kết quả sync AD).
+    assert viewer_client.get("/api/audit-logs/").status_code == 403
+
+
+def test_operator_cannot_read_audit_logs(operator_client):
+    assert operator_client.get("/api/audit-logs/").status_code == 403
+
+
+def test_admin_can_read_audit_logs(admin_client):
+    assert admin_client.get("/api/audit-logs/").status_code == 200
+
+
 def test_viewer_cannot_create_credential(viewer_client):
     r = viewer_client.post(
         "/api/credentials/",

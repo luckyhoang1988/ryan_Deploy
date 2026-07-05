@@ -50,6 +50,11 @@ def _ensure_public_host(hostname: str) -> None:
         raise DownloadError(f"Không resolve được host '{hostname}': {exc}") from exc
     for _family, _type, _proto, _canon, sockaddr in infos:
         ip = ipaddress.ip_address(sockaddr[0])
+        # Unwrap IPv4-mapped IPv6 (::ffff:a.b.c.d) về dạng IPv4 trước khi kiểm tra — phòng
+        # thủ chiều sâu, không phụ thuộc hoàn toàn vào việc stdlib ipaddress của MỌI phiên
+        # bản Python đều tự phân loại đúng is_private/is_loopback cho dạng địa chỉ này.
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
             raise DownloadError(
                 f"URL trỏ tới địa chỉ nội bộ/đặc biệt ({ip}) — không cho phép (chống SSRF)."
