@@ -2,10 +2,14 @@ import { Fragment, useEffect, useState } from "react";
 import { api, listOf, fetchAll } from "../api";
 import { useAuth } from "../auth";
 import Icon from "../components/Icon";
+import DeploymentWizard from "../components/DeploymentWizard";
 
 export default function Packages() {
   const { hasRole } = useAuth();
   const isAdmin = hasRole("admin");
+  // Deploy từ Package Library dùng chung quyền với trang Deployments (operator trở lên) —
+  // tách khỏi isAdmin vì thao tác CRUD package (upload/sửa/xóa) vẫn chỉ admin.
+  const canDeploy = hasRole("operator", "admin");
   const [packages, setPackages] = useState([]);
   const [folders, setFolders] = useState([]);
   const [selectedFolder, setSelectedFolder] = useState(null); // null = "Tất cả package"
@@ -16,6 +20,7 @@ export default function Packages() {
   const [showHistory, setShowHistory] = useState(false);
   const [editPkg, setEditPkg] = useState(null); // package đang sửa
   const [editVer, setEditVer] = useState(null); // version đang sửa
+  const [deployVersionId, setDeployVersionId] = useState(null); // version đang mở DeploymentWizard
   const [expanded, setExpanded] = useState(null); // id package đang mở versions
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
@@ -148,13 +153,18 @@ export default function Packages() {
           <table>
             <thead>
               <tr>
-                <th>Tên</th><th>Vendor</th><th>Versions</th><th>License khả dụng</th>
+                <th>Tên</th><th>Vendor</th><th>Versions</th><th>License khả dụng</th><th>Trạng thái</th>
+                {canDeploy && <th></th>}
                 {isAdmin && <th></th>}
               </tr>
             </thead>
             <tbody>
               {shownPackages.map((p) => {
                 const isOpen = expanded === p.id;
+                // Bản duyệt mới nhất — versions đã sort -created_at từ backend nên phần tử
+                // đầu khớp approved là latest_version.
+                const readyVersion = p.versions?.find((v) => v.approved);
+                const colCount = 5 + (canDeploy ? 1 : 0) + (isAdmin ? 1 : 0);
                 return (
                   <Fragment key={p.id}>
                     <tr>
@@ -167,6 +177,24 @@ export default function Packages() {
                         </button>
                       </td>
                       <td>{p.available_licenses}</td>
+                      <td>
+                        {readyVersion
+                          ? <span className="badge success">Sẵn sàng</span>
+                          : <span className="badge default">Chưa có installer</span>}
+                      </td>
+                      {canDeploy && (
+                        <td>
+                          <button
+                            className="btn ghost"
+                            style={{ padding: "4px 10px" }}
+                            disabled={!readyVersion}
+                            title={readyVersion ? "" : "Chưa có version đã duyệt — Tải từ URL hoặc Upload trước"}
+                            onClick={() => setDeployVersionId(readyVersion.id)}
+                          >
+                            🚀 Deploy
+                          </button>
+                        </td>
+                      )}
                       {isAdmin && (
                         <td>
                           <div className="row" style={{ gap: 6 }}>
@@ -178,7 +206,7 @@ export default function Packages() {
                     </tr>
                     {isOpen && (
                       <tr>
-                        <td colSpan={isAdmin ? 5 : 4} style={{ background: "rgba(0,0,0,0.15)" }}>
+                        <td colSpan={colCount} style={{ background: "rgba(0,0,0,0.15)" }}>
                           <VersionList
                             pkg={p}
                             isAdmin={isAdmin}
@@ -193,7 +221,7 @@ export default function Packages() {
                 );
               })}
               {shownPackages.length === 0 && (
-                <tr><td colSpan={isAdmin ? 5 : 4} className="muted">Chưa có package.</td></tr>
+                <tr><td colSpan={5 + (canDeploy ? 1 : 0) + (isAdmin ? 1 : 0)} className="muted">Chưa có package.</td></tr>
               )}
             </tbody>
           </table>
@@ -212,6 +240,14 @@ export default function Packages() {
           packages={packages}
           onClose={() => setShowFetch(false)}
           onDone={() => { setShowFetch(false); setMsg("Đang tải trong nền — làm mới sau ít phút để thấy version mới."); }}
+        />
+      )}
+      {deployVersionId && (
+        <DeploymentWizard
+          isAdmin={isAdmin}
+          initialPackageVersionId={deployVersionId}
+          onClose={() => setDeployVersionId(null)}
+          onDone={() => { setDeployVersionId(null); setMsg("Đã tạo & chạy deployment."); }}
         />
       )}
       {editPkg && (

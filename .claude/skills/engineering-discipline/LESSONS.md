@@ -14,6 +14,32 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-05 — "Deploy from Library": Wizard tách component dùng chung, vite proxy cần đúng port 8000
+**Bối cảnh:** Thêm nút "Deploy" 1 chạm từ trang Packages (mở sẵn `DeploymentWizard` với package
+version pre-fill), tách `Wizard` cục bộ của `Deployments.jsx` thành `components/DeploymentWizard.jsx`
+dùng chung cho cả 2 trang. Verify bằng dev server thật (Django settings.test + Vite) + Chrome
+headless/CDP (không có Playwright, theo pattern đã ghi ở bài học 2026-07-04/2026-07-05).
+**Bài học:**
+1. **`vite.config.js` proxy `/api`→`http://localhost:8000` là HARDCODE, không đọc env var** — chạy
+   Django dev server ở port khác (vd 8123 để tránh xung đột) sẽ khiến mọi gọi API từ UI 404/lỗi
+   CORS âm thầm mà trang vẫn "load" bình thường (chỉ rỗng dữ liệu). Phải chạy đúng port 8000, hoặc
+   sửa `vite.config.js` nếu cần port khác — không giả định proxy tự thích ứng.
+2. **Port 5173 có thể đã bị chiếm bởi tiến trình khác của máy** (không phải của mình) — Vite tự
+   nhảy sang 5174 và in rõ trong log ("Port 5173 is in use, trying another one..."). Luôn đọc log
+   khởi động để lấy ĐÚNG port thực tế trước khi điều hướng CDP, đừng giả định cổng mặc định.
+3. **RBAC bằng Django Groups, không phải field `role` trên User** (xem `apps/core/permissions.py`):
+   seed user test phải `Group.objects.get_or_create(name="admin"|"operator")` rồi `user.groups.set([g])`,
+   KHÔNG set `user.role = "..."` (field không tồn tại, `get_or_create(role=...)` ném
+   `FieldError` ngay).
+4. **Xác nhận pre-fill đúng bằng cách đọc `select.value`/`selectedIndex` qua CDP `Runtime.evaluate`**
+   (không chỉ chụp ảnh màn hình) — case này quan trọng vì mục tiêu chính của tính năng là
+   "đúng version được chọn sẵn", một chi tiết dễ sai (off-by-one, so sánh string vs number) mà
+   ảnh chụp không lộ nếu 2 version trùng tên hiển thị.
+**Áp dụng:** Trước khi verify UI bằng dev server: đọc `vite.config.js` lấy đúng port backend cần
+chạy (đừng tự chọn port tuỳ ý), đọc log Vite để lấy port thực tế nếu 5173 bận. Seed role test qua
+Django Groups. Verify giá trị pre-fill của form control qua DOM property (`.value`), không chỉ
+qua ảnh chụp màn hình.
+
 ## 2026-07-05 — Package .zip nhiều file (Office2016): {dir} token + tar.exe extract, quirk quoting {file}/{dir} có sẵn
 **Bối cảnh:** Thêm `InstallerType.ZIP` để deploy được bộ cài nhiều file/thư mục (VD Office2016
 offline source) — nén thành 1 file `.zip`, `PushExecutor` tự giải nén trên máy đích bằng `tar.exe`
