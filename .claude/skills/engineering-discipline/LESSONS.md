@@ -14,6 +14,37 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-05 — check_all_online: rò kết nối DB trong ThreadPoolExecutor + is_online đứng hình khi disable máy
+**Bối cảnh:** Review cơ chế xác định máy online (`apps/machines/tasks.py::check_all_online`,
+Celery beat 15 phút, `ThreadPoolExecutor(max_workers=32)` gọi `refresh_machine_status` — có
+`machine.save()`). Không phải yêu cầu fix cụ thể, tự phát hiện qua đọc code + grep xác nhận.
+**Bài học:**
+1. **Django chỉ tự đóng connection thread-local cho luồng CHÍNH của Celery task** (qua hook
+   nội bộ khi task bắt đầu/kết thúc). Luồng con do `ThreadPoolExecutor` tạo bên trong task nằm
+   NGOÀI vòng đời đó — connection Django mở trong các luồng này (do gọi `.save()`/query) không
+   bao giờ được đóng tường minh (không có `CONN_MAX_AGE` hay `close_old_connections` nào chạm
+   tới). Grep cả repo xác nhận không nơi nào xử lý việc này trước khi tôi thêm. Fix: viết 1
+   wrapper (`_refresh_and_close`) bọc `try/finally: connections.close_all()` quanh hàm thật, rồi
+   `pool.map(wrapper, ...)` thay vì map thẳng hàm gốc.
+2. **Giữ nguyên tên hàm gốc ở dạng global reference (không rebind cục bộ trong wrapper) để
+   monkeypatch cũ trong test vẫn ăn** — test hiện có patch `m_tasks.refresh_machine_status`
+   (tên module-level); wrapper gọi `refresh_machine_status(machine)` (không gán biến khác) nên
+   Python resolve tên đó lúc CALL TIME từ namespace module, patch vẫn có hiệu lực dù đã thêm 1
+   lớp bọc.
+3. **Field boolean kiểu "trạng thái do 1 tiến trình nền refresh định kỳ" (`is_online`) sẽ đứng
+   hình vĩnh viễn nếu điều kiện lọc của tiến trình nền (ở đây `enabled=True`) đổi mà không có
+   nơi nào chủ động reset field khi điều kiện đó tắt** (`enabled: True→False`). Vì các view
+   thống kê (dashboard `stats`/`report`) không lọc theo `enabled`, giá trị cũ vẫn được cộng vào
+   "machines_online" mãi mãi. Fix tại nguồn: override `perform_update` của ViewSet — nơi DUY
+   NHẤT trong codebase thay đổi `enabled` (đã grep xác nhận) — để set `is_online=False` ngay khi
+   phát hiện chuyển `True→False`, thay vì sửa từng query thống kê.
+**Áp dụng:** Bất kỳ tác vụ Celery nào tự tạo `ThreadPoolExecutor`/luồng OS thủ công để chạy
+song song và có ghi DB trong luồng con → PHẢI tự `connections.close_all()` cuối mỗi lần gọi
+trong luồng con, đừng tin Celery tự dọn. Field trạng thái được 1 job nền refresh theo điều kiện
+lọc → khi điều kiện lọc của record đổi (bị loại khỏi phạm vi refresh), phải chủ động reset field
+đó tại đúng nơi điều kiện thay đổi, không chỉ dựa vào lần refresh tiếp theo (có thể không bao
+giờ tới).
+
 ## 2026-07-05 — Vá 15 bug audit High/Medium: đảo ngược quyết định fail-open, seam mock đổi khi thêm SSRF guard
 **Bối cảnh:** Từ 1 báo cáo audit ngoài, verify + vá 15 bug (purge_all ProtectedError, credential
 lộ cho viewer, job log lộ output cho viewer, task_status không kiểm chủ sở hữu, schedule mất 1

@@ -50,6 +50,15 @@ class MachineViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return self._apply_filters(super().get_queryset())
 
+    def perform_update(self, serializer):
+        # Máy bị disable không còn được check_all_online refresh → is_online cũ sẽ
+        # đứng hình mãi mãi và làm sai lệch thống kê online/offline. Xóa ngay lúc tắt.
+        was_enabled = serializer.instance.enabled
+        serializer.save()
+        if was_enabled and not serializer.instance.enabled:
+            serializer.instance.is_online = False
+            serializer.instance.save(update_fields=["is_online"])
+
     @action(detail=False, methods=["get"])
     def stats(self, request):
         """Thống kê tổng, online, offline (áp dụng bộ lọc hiện tại)."""

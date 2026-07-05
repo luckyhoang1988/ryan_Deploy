@@ -3,6 +3,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 
 from celery import shared_task
+from django.db import connections
 
 from .ad_sync import sync_computers_from_ad
 from .connectivity import refresh_machine_status
@@ -31,6 +32,15 @@ def sync_from_ad(search_ou: str | None = None, user_id: int | None = None, purge
     return data
 
 
+def _refresh_and_close(machine) -> bool:
+    """Refresh 1 máy rồi đóng kết nối DB thread-local — luồng của ThreadPoolExecutor
+    nằm ngoài vòng đời Celery task nên Django không tự đóng connection cho chúng."""
+    try:
+        return refresh_machine_status(machine)
+    finally:
+        connections.close_all()
+
+
 @shared_task(name="apps.machines.tasks.check_all_online")
 def check_all_online():
     """Kiểm tra song song trạng thái online của mọi máy enabled."""
@@ -39,7 +49,7 @@ def check_all_online():
         return {"checked": 0, "online": 0}
 
     with ThreadPoolExecutor(max_workers=32) as pool:
-        results = list(pool.map(refresh_machine_status, machines))
+        results = list(pool.map(_refresh_and_close, machines))
 
     online = sum(1 for r in results if r)
     logger.info("Online check: %s/%s máy online", online, len(machines))
