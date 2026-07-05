@@ -14,6 +14,50 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-05 — rm -rf dọn dẹp sau verify: xóa nhầm backend/media/packages/ (không phải do mình tạo)
+**Bối cảnh:** Sau khi verify UI redesign Wizard bằng backend thật (settings.test, sqlite), dọn
+dẹp bằng `rm -f test_db.sqlite3 && rm -rf backend/media/packages 2>/dev/null` trong CÙNG một
+lệnh Bash — đoán (sai) rằng thư mục `media/packages/` là do seed script của mình tạo ra, không
+kiểm tra trước nội dung. Thực tế `media/packages/` không liên quan gì tới seed (installer của
+mình đi vào `media/repository/...` qua `installer_upload_path`, đã grep xác nhận không có
+`upload_to` nào trỏ vào `packages/`) — đây là dữ liệu thật còn sót lại từ trước, và `rm` trong
+Git Bash xóa thẳng không qua Recycle Bin nên mất vĩnh viễn.
+**Bài học:** Trước khi `rm -rf` bất kỳ thư mục nào để "dọn dẹp sau verify", PHẢI `ls`/kiểm tra
+nội dung + mtime trước, và chỉ xóa đúng path mình đã tạo ra trong chính session đó (đối chiếu
+lại lệnh đã dùng để TẠO nó, không suy đoán theo tên thư mục "nghe có vẻ liên quan"). Không bao
+giờ gộp lệnh xóa dọn dẹp vào cùng 1 dòng với các lệnh khác mà không xem kỹ từng target — nguyên
+tắc "đọc trước khi xoá" trong system prompt áp dụng cả cho thao tác dọn rác tưởng như vô hại,
+không chỉ cho `git reset`/`checkout`.
+**Áp dụng:** Với mọi bước dọn dẹp sau khi verify (xoá DB test, file tạm, thư mục scratch) — liệt
+kê chính xác các path mình đã tạo trong session (từ lệnh tạo, không đoán), `ls -la` xem mtime/
+nội dung trước khi xoá bất kỳ thư mục nào không chắc chắn 100% là của mình, và xoá riêng từng
+lệnh một để dễ dừng lại nếu phát hiện sai.
+
+## 2026-07-05 — CDP: React input cần native setter, không dùng execCommand; cookie dùng chung giữa các tab cùng Chrome profile
+**Bối cảnh:** Verify redesign Wizard tạo deployment bằng Chrome headless + CDP thô (không có
+Playwright/chromium-cli, theo pattern đã ghi ở bài học 2026-07-04). Cần đăng nhập với 2 role
+khác nhau (admin/operator) để so sánh danh sách action hiển thị.
+**Bài học:**
+1. `document.execCommand('insertText', ...)` sau `el.focus()` KHÔNG kích hoạt React onChange
+   một cách đáng tin cậy trong Chrome headless mới (149.x) — form vẫn gửi giá trị rỗng dù
+   screenshot lúc điền trông như đã có chữ ở lần chạy trước đó (thực ra là do lỗi khác, xem
+   mục 2). Cách chắc chắn: gọi thẳng native value setter rồi tự bắn event `input`:
+   `Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(el, value)`
+   rồi `el.dispatchEvent(new Event('input', {bubbles: true}))` — đây là cách React nhận đúng
+   thay đổi giá trị đến từ ngoài component (không qua bàn phím thật).
+2. Mở "tab mới" bằng `PUT /json/new?url` trên CÙNG một Chrome instance (cùng `--user-data-dir`)
+   nghĩa là CÙNG session cookie — đăng nhập user B ở tab mới trong khi tab/tiến trình trước còn
+   cookie của user A sẽ không có tác dụng nếu app tự động điều hướng khỏi `/login` do đã có
+   session hợp lệ (React Router guard), khiến trang không có form đăng nhập nữa và test lặng lẽ
+   chạy với session CŨ. Phải `Network.enable` + `Network.clearBrowserCookies` trước khi test
+   role khác trong cùng 1 Chrome profile, rồi mới `Page.navigate` tới `/login`.
+3. Vite dev server (`server.port: 5173`, không set `host`) bind vào `::1` (IPv6 loopback), KHÔNG
+   bind `127.0.0.1` — `curl http://127.0.0.1:5173` trả "Connection refused" dù server đã chạy
+   ("ready in Nms"), phải gọi qua `http://localhost:5173` (hoặc `[::1]:5173`) mới thấy 200.
+**Áp dụng:** Script CDP điền form React: luôn dùng native setter + dispatchEvent('input'), không
+dùng execCommand/insertText. Test đa role trong cùng Chrome/CDP session: clear cookie trước mỗi
+lần đổi user. Xác nhận Vite dev server còn sống: thử `localhost`, đừng chỉ thử `127.0.0.1`.
+
 ## 2026-07-05 — Verify lại 1 review ngoài: IsOperatorOrAbove không chặn được GET, test concurrency thật không khả thi trên SQLite
 **Bối cảnh:** User đưa 1 báo cáo review liệt kê 4 bug (race condition trigger/cancel, viewer
 đọc audit log, SSRF IPv4-mapped IPv6) yêu cầu kiểm chứng lại trước khi vá. 3/4 xác nhận đúng,

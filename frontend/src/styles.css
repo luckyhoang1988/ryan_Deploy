@@ -272,7 +272,54 @@ label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px
 
 .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: flex; align-items: center; justify-content: center; }
 .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 24px; width: 460px; max-height: 85vh; overflow: auto; }
+.modal.modal-lg { width: 640px; }
 .log { background: #0b1220; border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-family: monospace; font-size: 12px; white-space: pre-wrap; max-height: 300px; overflow: auto; }
+
+/* Nhóm field theo section trong modal (Wizard tạo deployment) */
+.form-section { margin-top: 18px; }
+.form-section:first-of-type { margin-top: 0; }
+.form-section-title {
+  font-size: 12px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+
+/* Tùy chọn nâng cao — collapsible thuần <details>, không cần thêm state React */
+.adv-details { margin-top: 18px; border: 1px solid var(--border); border-radius: 10px; }
+.adv-details[open] { padding-bottom: 12px; }
+.adv-summary {
+  cursor: pointer; padding: 10px 14px; font-size: 13px; font-weight: 600;
+  color: var(--text); list-style: none; display: flex; align-items: center; gap: 8px;
+}
+.adv-summary::-webkit-details-marker { display: none; }
+.adv-summary::before { content: "▸"; color: var(--muted); display: inline-block; transition: transform .12s; }
+.adv-details[open] .adv-summary::before { transform: rotate(90deg); }
+.adv-body { padding: 0 14px; }
+
+/* MachinePicker (dùng chung Wizard + lịch lặp) */
+.machine-list { max-height: 300px; }
+.machine-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; margin: 1px 0; }
+.machine-row:hover { background: var(--panel2); }
+.machine-row input[type="checkbox"] { width: auto; }
+.machine-row.is-disabled { opacity: 0.45; }
+.machine-row .machine-ou { font-size: 12px; }
+.machine-off-badge { margin-left: auto; }
+
+.status-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.status-dot.online { background: var(--green); }
+.status-dot.offline { background: var(--muted); }
+.status-dot.disabled { background: var(--muted); opacity: 0.5; }
+
+.chip-group {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  background: var(--panel2); border: 1px solid var(--border);
+  color: var(--text); font-size: 12px; cursor: pointer;
+}
+.chip-group:hover { border-color: var(--accent); color: var(--accent); }
+
+.machine-picker-summary { font-size: 12px; margin: 6px 0 0; }
+.warn-inline { color: var(--amber); font-size: 12px; margin: 4px 0 0; }
 
 /* Filter Bar */
 .filter-bar {

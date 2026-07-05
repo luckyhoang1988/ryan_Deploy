@@ -1,17 +1,9 @@
 import { useEffect, useState } from "react";
-import { api, fetchAll, listOf } from "../api";
+import { api, listOf } from "../api";
 import { useAuth } from "../auth";
+import MachinePicker from "../components/MachinePicker";
+import { ACTIONS, PACKAGE_ACTIONS, ADMIN_ONLY_ACTIONS } from "../constants/deployment";
 
-// Action cần chọn package version; các action khác chạy không gắn package (khớp Deployments.jsx).
-const ACTIONS = [
-  { value: "install", label: "Cài đặt" },
-  { value: "uninstall", label: "Gỡ cài đặt" },
-  { value: "reboot", label: "Khởi động lại" },
-  { value: "shutdown", label: "Tắt máy" },
-  { value: "inventory", label: "Quét phần mềm (inventory)" },
-];
-const PACKAGE_ACTIONS = ["install", "uninstall"];
-const ADMIN_ONLY_ACTIONS = ["reboot", "shutdown"];
 const WEEKDAY_LABELS = ["Th 2", "Th 3", "Th 4", "Th 5", "Th 6", "Th 7", "CN"];
 
 function recurrenceLabel(s) {
@@ -129,8 +121,6 @@ function ScheduleModal({ sched, isAdmin, onClose, onDone }) {
   const isEdit = !!sched;
   const [versions, setVersions] = useState([]);
   const [credentials, setCredentials] = useState([]);
-  const [machines, setMachines] = useState([]);
-  const [machineSearch, setMachineSearch] = useState("");
   const [form, setForm] = useState({
     name: sched?.name || "",
     action: sched?.action || "install",
@@ -153,18 +143,7 @@ function ScheduleModal({ sched, isAdmin, onClose, onDone }) {
   useEffect(() => {
     api.get("/package-versions/").then((d) => setVersions(listOf(d)));
     api.get("/credentials/").then((d) => setCredentials(listOf(d))).catch(() => {});
-    fetchAll("/machines/").then(setMachines).catch((e) => setErr(e.message));
   }, []);
-
-  const q = machineSearch.trim().toLowerCase();
-  const shownMachines = q ? machines.filter((m) => m.hostname.toLowerCase().includes(q)) : machines;
-
-  const toggleMachine = (id) => {
-    setForm((f) => {
-      const has = f.target_machines.includes(id);
-      return { ...f, target_machines: has ? f.target_machines.filter((x) => x !== id) : [...f.target_machines, id] };
-    });
-  };
 
   const toggleWeekday = (d) => {
     setForm((f) => {
@@ -271,38 +250,8 @@ function ScheduleModal({ sched, isAdmin, onClose, onDone }) {
         </label>
 
         <hr style={{ border: 0, borderTop: "1px solid rgba(255,255,255,0.1)", margin: "14px 0 4px" }} />
-        <label>Máy đích ({form.target_machines.length} chọn / {machines.length} máy)</label>
-        <div className="row" style={{ gap: 8, marginBottom: 6 }}>
-          <input
-            type="text"
-            placeholder="🔍 Lọc theo hostname…"
-            value={machineSearch}
-            onChange={(e) => setMachineSearch(e.target.value)}
-            style={{ flex: 1 }}
-          />
-          <button type="button" className="btn ghost" style={{ padding: "6px 10px" }}
-            onClick={() => setForm((f) => ({ ...f, target_machines: [...new Set([...f.target_machines, ...shownMachines.map((m) => m.id)])] }))}>
-            Chọn hết ({shownMachines.length})
-          </button>
-          {form.target_machines.length > 0 && (
-            <button type="button" className="btn ghost" style={{ padding: "6px 10px" }}
-              onClick={() => setForm((f) => ({ ...f, target_machines: [] }))}>
-              Bỏ chọn
-            </button>
-          )}
-        </div>
-        <div className="log" style={{ maxHeight: 160 }}>
-          {shownMachines.map((m) => (
-            <label key={m.id} className="row" style={{ margin: "2px 0" }}>
-              <input type="checkbox" style={{ width: "auto" }}
-                checked={form.target_machines.includes(m.id)}
-                onChange={() => toggleMachine(m.id)} />
-              <span>{m.hostname} {m.is_online ? "🟢" : "⚪"}</span>
-            </label>
-          ))}
-          {machines.length === 0 && <span className="muted">Chưa có máy.</span>}
-          {machines.length > 0 && shownMachines.length === 0 && <span className="muted">Không có máy khớp bộ lọc.</span>}
-        </div>
+        <label>Máy đích</label>
+        <MachinePicker value={form.target_machines} onChange={(v) => setForm((f) => ({ ...f, target_machines: v }))} />
 
         {err && <p className="error mt">{err}</p>}
         <div className="row spread mt">
