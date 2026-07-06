@@ -227,6 +227,7 @@ label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px
   display: flex; align-items: center; padding: 2px; flex: none;
 }
 .tree-toggle-spacer { width: 17px; flex: none; }
+.tree-node input[type="checkbox"] { width: auto; flex: none; }
 .tree-label {
   display: flex; align-items: center; gap: 6px; cursor: pointer; flex: 1;
   font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -304,6 +305,7 @@ label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px
 .machine-row.is-disabled { opacity: 0.45; }
 .machine-row .machine-ou { font-size: 12px; }
 .machine-off-badge { margin-left: auto; }
+.ou-tree-count { font-size: 12px; }
 
 .status-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .status-dot.online { background: var(--green); }
