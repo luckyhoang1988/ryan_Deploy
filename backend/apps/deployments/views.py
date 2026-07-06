@@ -41,6 +41,7 @@ class DeploymentViewSet(viewsets.ModelViewSet):
                 filter=Q(jobs__status__in=[JobStatus.SUCCESS, JobStatus.SUCCESS_REBOOT]),
             ),
             n_failed=Count("jobs", filter=Q(jobs__status=JobStatus.FAILED)),
+            n_skipped=Count("jobs", filter=Q(jobs__status=JobStatus.SKIPPED)),
             n_pending=Count(
                 "jobs",
                 filter=Q(
@@ -78,7 +79,7 @@ class DeploymentViewSet(viewsets.ModelViewSet):
         writer = csv.writer(buf)
         writer.writerow([
             "Tên", "Package", "Version", "Trạng thái",
-            "Thành công", "Thất bại", "Đang chờ", "Tổng máy",
+            "Thành công", "Thất bại", "Bỏ qua (đã tồn tại)", "Đang chờ", "Tổng máy",
             "Ngày tạo", "Ngày hoàn thành",
         ])
         # chunk_size bắt buộc vì queryset có prefetch_related (target_machines).
@@ -92,6 +93,7 @@ class DeploymentViewSet(viewsets.ModelViewSet):
                 d.get_status_display(),
                 d.n_success,
                 d.n_failed,
+                d.n_skipped,
                 d.n_pending,
                 d.n_total,
                 d.created_at.strftime("%Y-%m-%d %H:%M") if d.created_at else "",

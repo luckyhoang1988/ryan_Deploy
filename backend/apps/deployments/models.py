@@ -107,6 +107,12 @@ class Deployment(TimeStampedModel):
         return self.jobs.filter(status="failed").count()
 
     @property
+    def skipped_count(self):
+        # Bỏ qua vì phần mềm đã có sẵn trên máy đích (xem apps.jobs.tasks._probe_already_installed)
+        # — không phải lỗi, tính vào "đã xong" cùng success ở finalize_deployment/DeployProgress.
+        return self.jobs.filter(status="skipped").count()
+
+    @property
     def pending_count(self):
         return self.jobs.filter(status__in=["pending", "queued", "running"]).count()
 

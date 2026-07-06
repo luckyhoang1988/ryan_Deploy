@@ -155,7 +155,7 @@ export default function DeploymentDetail() {
       <div className="row" style={{ gap: 20 }}>
         <div><span className="muted">Package: </span>{dep.package_name} {dep.version}</div>
         <StatusBadge status={dep.status} />
-        <div className="muted">{dep.success_count}✓ / {dep.failed_count}✗ / {dep.pending_count}⏳ / {dep.total_count} máy</div>
+        <div className="muted">{dep.success_count}✓ / {dep.failed_count}✗ / {dep.skipped_count}⏭ / {dep.pending_count}⏳ / {dep.total_count} máy</div>
       </div>
 
       <DeployProgress dep={dep} />

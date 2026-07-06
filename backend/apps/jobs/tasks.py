@@ -179,15 +179,43 @@ def _start_and_dispatch(self, job, deployment, machine, credential, pv) -> dict:
         logger.error("Giải mã credential lỗi cho job %s (%s): %s", job_id, machine.hostname, e)
         return {"job_id": job_id, "status": "failed", "error": "credential_decrypt_failed"}
 
-    executor = PushExecutor(
-        host=machine.target_address,
-        username=credential.username,
-        password=cred_password,
-        domain=credential.domain,
-        timeout=_job_timeout(),
-        progress_cb=progress,
-        cancel_check=is_cancelled,
-    )
+    def make_executor(progress_cb=None):
+        return PushExecutor(
+            host=machine.target_address,
+            username=credential.username,
+            password=cred_password,
+            domain=credential.domain,
+            timeout=_job_timeout(),
+            progress_cb=progress_cb,
+            cancel_check=is_cancelled,
+        )
+
+    # --- Đã tồn tại?: install mà phần mềm đã có sẵn trên máy đích -> bỏ qua, không cài lại ---
+    from apps.deployments.models import DeploymentAction
+
+    if deployment.action == DeploymentAction.INSTALL and plan.verify_name:
+        already, detail = _probe_already_installed(make_executor, plan, job)
+        if already:
+            msg = f"Đã cài đặt sẵn trên máy — bỏ qua (đã tồn tại). {detail}".strip()
+            if not _write_job_result(
+                job,
+                status=JobStatus.SKIPPED,
+                output=msg,
+                current_step="done",
+                finished_at=timezone.now(),
+            ):
+                logger.info("Job %s bị hủy đúng lúc xét bỏ qua (đã tồn tại)", job_id)
+                return {"job_id": job_id, "status": "cancelled"}
+            AuditLog.record(
+                AuditLog.Action.JOB_FINISH,
+                target=job,
+                machine_hostname=machine.hostname,
+                status=job.status,
+            )
+            logger.info("Job %s (%s) bỏ qua: phần mềm đã tồn tại", job_id, machine.hostname)
+            return {"job_id": job_id, "status": "skipped"}
+
+    executor = make_executor(progress_cb=progress)
 
     try:
         executor.start(
@@ -425,6 +453,39 @@ def _cleanup_cancelled_target(job, machine, credential, job_token):
         logger.warning("cleanup_now lỗi cho job %s (%s): %s", job.pk, machine.hostname, e)
 
 
+def _probe_already_installed(make_executor, plan, job):
+    """
+    Trước khi install: kiểm registry Uninstall xem phần mềm đã có mặt trên máy đích chưa —
+    có thì báo "đã tồn tại" để caller bỏ qua, không cài chồng lên bản đã có.
+
+    Trả (found, detail): found=True/False khi kết luận được; found=None khi KHÔNG kết luận
+    được (lỗi SMB/kết nối lúc kiểm) — caller phải cứ tiến hành cài bình thường, không suy
+    diễn từ một lần kiểm thất bại.
+    """
+    from apps.deployments.actions import VERIFY_SCRIPT_PATH
+
+    name = plan.verify_name.replace('"', "")  # tránh vỡ tham số PowerShell
+    command = (
+        f'powershell -NoProfile -ExecutionPolicy Bypass -File "{{file}}" '
+        f'-Name "{name}" -Present 1'
+    )
+    prober = make_executor(progress_cb=None)
+    pres = prober.run(
+        command,
+        local_payload_path=VERIFY_SCRIPT_PATH,
+        payload_filename="ryandeploy_verify.ps1",
+        success_exit_codes=[0],
+        job_token=f"job{job.pk}c",
+    )
+    if pres.exit_code is None:
+        logger.debug(
+            "Precheck 'đã tồn tại' cho job %s không kết luận được (%s) — cứ tiến hành cài",
+            job.pk, pres.error,
+        )
+        return None, pres.error
+    return (pres.exit_code == 0), (pres.stdout.strip() or pres.error)
+
+
 def _verify_install(make_executor, plan, job):
     """
     Hậu kiểm sau khi install/uninstall báo thành công — kiểm registry Uninstall có/không
@@ -498,16 +559,20 @@ def finalize_deployment(_results, deployment_id: int):
     total = deployment.total_count
     failed = deployment.failed_count
     success = deployment.success_count
+    skipped = deployment.skipped_count
+    # skipped (đã tồn tại, bỏ qua cài) tính như "đã đạt mục tiêu" cùng success — không phải
+    # lỗi, không phải hủy — để không lẫn với nhánh CANCELLED/FAILED bên dưới.
+    ok = success + skipped
 
     if total == 0:
         new_status = DeploymentStatus.COMPLETED
-    elif success == 0 and failed == 0:
+    elif ok == 0 and failed == 0:
         # Không thành công cũng không thất bại → mọi job đã bị hủy (reconcile sau khi
         # cancel terminate). Đánh CANCELLED thay vì COMPLETED cho đúng bản chất.
         new_status = DeploymentStatus.CANCELLED
     elif failed == 0:
         new_status = DeploymentStatus.COMPLETED
-    elif success == 0:
+    elif ok == 0:
         new_status = DeploymentStatus.FAILED
     else:
         new_status = DeploymentStatus.COMPLETED_WITH_ERRORS

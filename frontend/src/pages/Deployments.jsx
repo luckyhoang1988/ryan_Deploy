@@ -124,7 +124,7 @@ export default function Deployments() {
               <td>{d.name}</td>
               <td>{d.package_name} {d.version}</td>
               <td><StatusBadge status={d.status} /></td>
-              <td className="muted">{d.success_count}✓ / {d.failed_count}✗ / {d.total_count} máy</td>
+              <td className="muted">{d.success_count}✓ / {d.failed_count}✗ / {d.skipped_count}⏭ / {d.total_count} máy</td>
               <td>
                 <div className="row" style={{ gap: 10, justifyContent: "flex-end" }}>
                   <Link to={`/deployments/${d.id}`}>Chi tiết →</Link>

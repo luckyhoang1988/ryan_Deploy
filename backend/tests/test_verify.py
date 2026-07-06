@@ -38,12 +38,16 @@ def _job(credential, pv):
 class _FakeExecutor:
     """
     start() = khởi chạy install (không trả kết quả); poll_once() lần đầu trả về
-    install_result (giả lập cài xong ngay ở lần poll đầu tiên); run() = verify (theo
-    verify_result) — verify vẫn dùng run() cũ, chỉ install/collect đổi sang start/poll_once.
+    install_result (giả lập cài xong ngay ở lần poll đầu tiên); run() dùng cho cả 2 bước
+    kiểm registry qua job_token (đặt bởi apps.jobs.tasks): "...c" = precheck "đã tồn tại"
+    (theo precheck_result), "...v" = hậu kiểm sau install (theo verify_result).
     """
 
     install_result = None
     verify_result = None
+    # Mặc định: không kết luận được (exit_code None) -> _start_and_dispatch cứ tiến hành cài
+    # bình thường, giữ đúng hành vi trước khi có precheck (test không cần khai báo lại).
+    precheck_result = None
     commands = []
     log = []
 
@@ -57,8 +61,10 @@ class _FakeExecutor:
     def poll_once(self, job_token, **kw):
         return _FakeExecutor.install_result
 
-    def run(self, command, **kw):
+    def run(self, command, *, job_token=None, **kw):
         _FakeExecutor.commands.append(command)
+        if job_token and job_token.endswith("c"):
+            return _FakeExecutor.precheck_result
         return _FakeExecutor.verify_result
 
 
@@ -68,6 +74,7 @@ def _patch(monkeypatch):
     # collect_job_result.apply_async(...) ĐỒNG BỘ ngay trong deploy_to_machine.apply() (xem
     # LESSONS.md/plan) nên 1 lần .apply().get() vẫn chạy trọn chuỗi start→poll→verify.
     _FakeExecutor.commands = []
+    _FakeExecutor.precheck_result = ExecResult(success=False, exit_code=None, error="")
     monkeypatch.setattr("apps.jobs.tasks.PushExecutor", _FakeExecutor)
     monkeypatch.setattr("apps.deployments.semaphore.acquire_slot", lambda *a, **k: True)
     monkeypatch.setattr("apps.deployments.semaphore.release_slot", lambda *a, **k: None)
@@ -89,7 +96,7 @@ def test_verify_fail_marks_job_failed(credential):
     assert job.status == JobStatus.FAILED
     assert job.current_step == "verify"
     assert "HẬU KIỂM THẤT BẠI" in job.error_output
-    assert len(_FakeExecutor.commands) == 2  # có chạy bước verify
+    assert len(_FakeExecutor.commands) == 3  # precheck "đã tồn tại" + install + verify
 
 
 def test_verify_pass_marks_job_success(credential):
@@ -101,7 +108,7 @@ def test_verify_pass_marks_job_success(credential):
 
     job.refresh_from_db()
     assert job.status == JobStatus.SUCCESS
-    assert len(_FakeExecutor.commands) == 2
+    assert len(_FakeExecutor.commands) == 3  # precheck "đã tồn tại" + install + verify
 
 
 def test_no_verify_name_skips_check(credential):
@@ -127,3 +134,53 @@ def test_verify_inconclusive_keeps_success(credential):
 
     job.refresh_from_db()
     assert job.status == JobStatus.SUCCESS
+
+
+def test_precheck_already_installed_skips_job(credential):
+    # Máy đích ĐÃ có phần mềm (precheck FOUND) → job SKIPPED, không chạy install/verify.
+    job = _job(credential, _pv(verify_name="Firefox"))
+    _FakeExecutor.precheck_result = _res(True, 0, stdout="FOUND: Mozilla Firefox 128")
+
+    deploy_to_machine.apply(args=[job.id]).get()
+
+    job.refresh_from_db()
+    assert job.status == JobStatus.SKIPPED
+    assert "đã tồn tại" in job.output
+    assert len(_FakeExecutor.commands) == 1  # chỉ chạy precheck, không install/verify
+
+
+def test_precheck_not_installed_proceeds_with_install(credential):
+    # Máy đích CHƯA có phần mềm (precheck NOT FOUND) → tiến hành cài như bình thường.
+    job = _job(credential, _pv(verify_name="Firefox"))
+    _FakeExecutor.precheck_result = _res(False, 1, stdout="NOT FOUND: *Firefox*")
+    _FakeExecutor.install_result = _res(True, 0)
+    _FakeExecutor.verify_result = _res(True, 0, stdout="FOUND: Mozilla Firefox 128")
+
+    deploy_to_machine.apply(args=[job.id]).get()
+
+    job.refresh_from_db()
+    assert job.status == JobStatus.SUCCESS
+    assert len(_FakeExecutor.commands) == 3  # precheck + install + verify
+
+
+def test_precheck_skipped_for_uninstall_action(credential):
+    # Precheck "đã tồn tại" chỉ áp dụng cho action install — uninstall không bị ảnh hưởng
+    # dù package version có verify_name.
+    pv = _pv(verify_name="Firefox")
+    dep = Deployment.objects.create(
+        name="U", action=DeploymentAction.UNINSTALL, package_version=pv, credential=credential
+    )
+    m = Machine.objects.create(hostname="PC-2")
+    dep.target_machines.add(m)
+    job = Job.objects.create(deployment=dep, machine=m, status=JobStatus.QUEUED)
+
+    _FakeExecutor.precheck_result = _res(True, 0, stdout="FOUND: Mozilla Firefox 128")
+    _FakeExecutor.install_result = _res(True, 0)
+    # Hậu kiểm uninstall (Present=0) ĐẠT: script trả success khi phần mềm đã mất.
+    _FakeExecutor.verify_result = _res(True, 0, stdout="NOT FOUND: *Firefox*")
+
+    deploy_to_machine.apply(args=[job.id]).get()
+
+    job.refresh_from_db()
+    assert job.status == JobStatus.SUCCESS
+    assert len(_FakeExecutor.commands) == 2  # uninstall + hậu kiểm — KHÔNG có precheck

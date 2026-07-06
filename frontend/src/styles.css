@@ -154,6 +154,7 @@ label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px
 }
 .progress-seg { height: 100%; transition: width 0.4s ease; }
 .progress-seg.success { background: var(--green); }
+.progress-seg.skipped { background: var(--muted); }
 .progress-seg.failed { background: var(--red); }
 .progress-seg.running {
   background: repeating-linear-gradient(

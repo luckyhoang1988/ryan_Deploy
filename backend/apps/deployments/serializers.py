@@ -38,6 +38,7 @@ class DeploymentSerializer(serializers.ModelSerializer):
     total_count = serializers.SerializerMethodField()
     success_count = serializers.SerializerMethodField()
     failed_count = serializers.SerializerMethodField()
+    skipped_count = serializers.SerializerMethodField()
     pending_count = serializers.SerializerMethodField()
 
     @staticmethod
@@ -53,6 +54,9 @@ class DeploymentSerializer(serializers.ModelSerializer):
 
     def get_failed_count(self, obj):
         return self._count(obj, "n_failed", "failed_count")
+
+    def get_skipped_count(self, obj):
+        return self._count(obj, "n_skipped", "skipped_count")
 
     def get_pending_count(self, obj):
         return self._count(obj, "n_pending", "pending_count")
@@ -78,6 +82,7 @@ class DeploymentSerializer(serializers.ModelSerializer):
             "total_count",
             "success_count",
             "failed_count",
+            "skipped_count",
             "pending_count",
             "created_at",
         ]
