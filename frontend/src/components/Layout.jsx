@@ -42,6 +42,11 @@ export default function Layout({ children }) {
               <Icon name="users" /> <span>Người dùng</span>
             </NavLink>
           )}
+          {hasRole("admin") && (
+            <NavLink to="/audit-logs">
+              <Icon name="activity" /> <span>Audit Log</span>
+            </NavLink>
+          )}
         </nav>
         <RunningPanel />
       </aside>

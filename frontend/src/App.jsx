@@ -11,6 +11,7 @@ import Schedules from "./pages/Schedules";
 import Updates from "./pages/Updates";
 import Credentials from "./pages/Credentials";
 import Users from "./pages/Users";
+import AuditLogs from "./pages/AuditLogs";
 import Guide from "./pages/Guide";
 
 export default function App() {
@@ -31,6 +32,7 @@ export default function App() {
         <Route path="/updates" element={<Updates />} />
         <Route path="/credentials" element={<Credentials />} />
         <Route path="/users" element={<Users />} />
+        <Route path="/audit-logs" element={<AuditLogs />} />
         <Route path="/guide" element={<Guide />} />
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
