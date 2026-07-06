@@ -182,6 +182,14 @@ RYANDEPLOY = {
     "SERVICE_PREFIX": env("RYANDEPLOY_SERVICE_PREFIX", "RyanDeployRunner"),
     "MAX_CONCURRENCY": env_int("RYANDEPLOY_MAX_CONCURRENCY", 15),
     "JOB_TIMEOUT": env_int("RYANDEPLOY_JOB_TIMEOUT", 1800),
+    # --- Collect (poll kết quả cài đặt không chặn worker) ---
+    # Khoảng cách giữa các lần poll exit.code qua SMB (collect_job_result tự self.retry).
+    # Không đặt quá thấp: mỗi lần poll phải re-login SMB/NTLM (không giữ kết nối mở như vòng
+    # lặp cũ) nên cần cân bằng chi phí login với độ trễ phát hiện cài xong.
+    "COLLECT_POLL_INTERVAL": env_int("RYANDEPLOY_COLLECT_POLL_INTERVAL", 12),
+    # Độ trễ trước lần poll ĐẦU TIÊN sau khi start() xong — nhỏ hơn interval vì action
+    # reboot/shutdown/inventory thường hoàn tất rất nhanh, không nên bắt chờ đủ 1 interval.
+    "COLLECT_FIRST_POLL_DELAY": env_int("RYANDEPLOY_COLLECT_FIRST_POLL_DELAY", 5),
     # Trần kích thước file installer được upload (MB) — chặn làm đầy đĩa. Django stream
     # file lớn ra temp disk (không nạp hết RAM) nên đây là giới hạn dung lượng, không phải RAM.
     # 8192 (8 GB) đủ cho package archive .zip nhiều file (VD bộ cài Office offline).

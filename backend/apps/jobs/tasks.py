@@ -5,6 +5,8 @@ deploy_to_machine(job_id): thực thi đẩy tới 1 máy.
 finalize_deployment(_, deployment_id): tổng kết trạng thái deployment sau khi tất cả job xong.
 """
 import logging
+import uuid
+from datetime import timedelta
 
 from celery import shared_task
 from django.db.models import F
@@ -51,10 +53,19 @@ def deploy_to_machine(self, job_id: int):
         logger.debug("Job %s chờ slot (max_concurrency=%s)", job_id, deployment.max_concurrency)
         raise self.retry(countdown=5)
 
+    # status="collecting" nghĩa là start() đã thành công và job đã được giao cho
+    # collect_job_result theo dõi tiếp — slot PHẢI giữ nguyên (không release ở đây), vì máy
+    # đích vẫn đang cài dở. Mọi status khác nghĩa là job đã kết thúc/fail/retry-transient
+    # NGAY trong lần gọi này (không có collect_job_result nào giữ trách nhiệm release) nên
+    # release ngay tại đây — giữ đúng contract return-value cũ (status/error) cho caller.
+    handed_off = False
     try:
-        return _run_job(self, job, deployment, machine, credential, pv)
+        result = _start_and_dispatch(self, job, deployment, machine, credential, pv)
+        handed_off = result.get("status") == "collecting"
+        return result
     finally:
-        release_slot(deployment.id)
+        if not handed_off:
+            release_slot(deployment.id)
 
 
 def _write_job_result(job, **fields) -> bool:
@@ -70,7 +81,17 @@ def _write_job_result(job, **fields) -> bool:
     return bool(updated)
 
 
-def _run_job(self, job, deployment, machine, credential, pv):
+def _start_and_dispatch(self, job, deployment, machine, credential, pv) -> dict:
+    """
+    Chạy tới hết precheck/copy/execute (executor.start(), nhanh — vài giây) rồi giao job cho
+    collect_job_result theo dõi tiếp KHÔNG ĐỒNG BỘ — worker được trả lại pool ngay, không
+    còn phải ngủ chờ suốt thời gian cài (có thể tới 30 phút) như executor.run() cũ.
+
+    Trả dict {"job_id":..., "status": "collecting"} nếu đã handoff thành công cho
+    collect_job_result (deploy_to_machine KHÔNG được release slot — máy đích vẫn đang cài
+    dở). Trả dict {"status": "cancelled"/"failed", ...} nếu job đã kết thúc/fail/retry-
+    transient NGAY trong lần gọi này (không có collect_job_result nào giữ trách nhiệm release).
+    """
     job_id = job.pk
     # Claim nguyên tử: chỉ chạy nếu job còn QUEUED — chặn trường hợp cancel_deployment()
     # đã đặt CANCELLED giữa lúc job chờ slot/hàng đợi và lúc worker thực sự bắt đầu chạy.
@@ -131,23 +152,23 @@ def _run_job(self, job, deployment, machine, credential, pv):
 
     def progress(step, message):
         # Cập nhật step hiện tại (nhẹ, chỉ 1 field) — dùng update() nên KHÔNG kích hoạt
-        # post_save signal (signals.py), phải broadcast tường minh ở đây.
+        # post_save signal (signals.py), phải broadcast tường minh ở đây. start() chỉ emit
+        # tới "collect" (1 lần, ở cuối) nên không spam broadcast — poll_once() ở
+        # collect_job_result không dùng progress_cb này.
         Job.objects.filter(pk=job.pk).update(current_step=step)
         broadcast_job_step(job.pk, deployment.id, step)
 
     def is_cancelled():
-        # Poll trạng thái CANCELLED giữa các bước (đặc biệt trong vòng chờ collect dài) để
-        # dừng đẩy hợp tác — bổ sung cho revoke(terminate) vốn không chắc dừng sạch.
+        # Poll trạng thái CANCELLED giữa các bước để dừng đẩy hợp tác — bổ sung cho
+        # revoke(terminate) vốn không chắc dừng sạch.
         return Job.objects.filter(pk=job.pk, status=JobStatus.CANCELLED).exists()
 
-    # Factory: dùng cho lần chạy chính và lần hậu kiểm (mỗi lần 1 instance sạch, tránh
-    # gộp log giữa hai lần chạy). Giải mã mật khẩu 1 lần.
     try:
         cred_password = credential.get_password()
     except Exception as e:
         # Sai/xoay VAULT_KEY hoặc ciphertext hỏng -> decrypt ném lỗi. Không bắt thì
-        # exception thoát khỏi Celery task, job đã claim RUNNING (dòng 77-82) sẽ kẹt
-        # vĩnh viễn vì không còn chỗ nào ghi FAILED. Lỗi không tự khỏi khi retry.
+        # exception thoát khỏi Celery task, job đã claim RUNNING sẽ kẹt vĩnh viễn vì không
+        # còn chỗ nào ghi FAILED. Lỗi không tự khỏi khi retry.
         _write_job_result(
             job,
             status=JobStatus.FAILED,
@@ -158,7 +179,133 @@ def _run_job(self, job, deployment, machine, credential, pv):
         logger.error("Giải mã credential lỗi cho job %s (%s): %s", job_id, machine.hostname, e)
         return {"job_id": job_id, "status": "failed", "error": "credential_decrypt_failed"}
 
-    def make_executor(progress_cb=progress):
+    executor = PushExecutor(
+        host=machine.target_address,
+        username=credential.username,
+        password=cred_password,
+        domain=credential.domain,
+        timeout=_job_timeout(),
+        progress_cb=progress,
+        cancel_check=is_cancelled,
+    )
+
+    try:
+        executor.start(
+            plan.command,
+            local_payload_path=plan.payload_path,
+            payload_filename=plan.payload_filename,
+            job_token=f"job{job.pk}",
+            extract_payload=plan.extract_payload,
+        )
+    except ExecutorError as e:
+        return _handle_start_failure(self, job, deployment, machine, e)
+
+    # start() thành công: service đã chạy trên máy đích. Lưu lại log start() + celery_task_id
+    # TRƯỚC KHI dispatch (không phải sau) — dưới CELERY_TASK_ALWAYS_EAGER (test), apply_async()
+    # chạy collect_job_result ĐỒNG BỘ TỚI HẾT (kể cả các lần self.retry() đệ quy) trước khi
+    # trả về, nên nếu update() job nằm SAU dispatch, nó sẽ đè lên đúng lúc collect_job_result
+    # đã ghi xong kết quả cuối, xóa mất log/step đã tích luỹ. Tự sinh task_id trước để tránh
+    # phụ thuộc thứ tự thực thi giữa 2 môi trường (broker thật vs eager).
+    task_id = uuid.uuid4().hex
+    Job.objects.filter(pk=job.pk).update(
+        output="\n".join(executor.log), celery_task_id=task_id
+    )
+    collect_job_result.apply_async(args=[job.pk], countdown=_collect_first_delay(), task_id=task_id)
+    return {"job_id": job.pk, "status": "collecting"}
+
+
+def _handle_start_failure(self, job, deployment, machine, e: ExecutorError) -> dict:
+    """Lỗi ở precheck/copy/execute (executor.start()) — quyết định retry-transient hay FAILED
+    chung cuộc, y hệt logic quyết định retry cũ (dựa vào step/retryable thay vì ExecResult vì
+    start() raise exception chứ không trả kết quả). Trả dict (đã xử lý xong tại đây, không
+    handoff) hoặc raise self.retry() để Celery tự gọi lại task sau backoff."""
+    from apps.audit.models import AuditLog
+
+    job_id = job.pk
+    base_fields = {
+        "error_output": str(e),
+        "current_step": e.step,
+        "finished_at": timezone.now(),
+    }
+    # Đếm số lần thử THẬT qua job.attempts (không dùng self.request.retries vì retries còn
+    # tính cả những lần chờ slot concurrency, không phải lỗi thật). e.retryable=False cho lỗi
+    # chắc chắn không tự khỏi (vd sai credential) → không retry.
+    transient = e.step in _TRANSIENT_STEPS and e.retryable
+    if transient and job.attempts <= deployment.retry_limit:
+        if not _write_job_result(job, status=JobStatus.QUEUED, **base_fields):
+            logger.info("Job %s bị hủy đúng lúc xét retry — bỏ qua", job_id)
+            return {"job_id": job_id, "status": "cancelled"}
+        countdown = 30 * (2 ** (job.attempts - 1))  # backoff 30s, 60s, 120s...
+        logger.info("Retry job %s sau %ss (transient: %s)", job_id, countdown, e)
+        raise self.retry(countdown=countdown, exc=e)
+
+    if not _write_job_result(job, status=JobStatus.FAILED, **base_fields):
+        logger.info("Job %s bị hủy đúng lúc ghi thất bại — bỏ qua", job_id)
+        return {"job_id": job_id, "status": "cancelled"}
+    AuditLog.record(
+        AuditLog.Action.JOB_FINISH,
+        target=job,
+        machine_hostname=machine.hostname,
+        status=job.status,
+        error=str(e)[:500],
+    )
+    return {"job_id": job_id, "status": "failed", "error": str(e)}
+
+
+@shared_task(bind=True, max_retries=None, acks_late=True)
+def collect_job_result(self, job_id: int):
+    """
+    Đọc thử kết quả cài đặt (đã được _start_and_dispatch khởi chạy từ trước) MỘT LẦN qua
+    `PushExecutor.poll_once()`; nếu chưa xong thì `self.retry(countdown=...)` để nhường worker
+    lại cho job khác giữa các lần poll — không sleep-block cả worker như collect loop cũ.
+    Đây là task tự lặp lại (giống cách deploy_to_machine tự retry khi chờ slot).
+    """
+    from apps.deployments.semaphore import release_slot
+
+    try:
+        job = Job.objects.select_related(
+            "machine", "deployment__credential", "deployment__package_version"
+        ).get(pk=job_id)
+    except Job.DoesNotExist:
+        logger.warning("Job %s không tồn tại (collect)", job_id)
+        return {"job_id": job_id, "status": "missing"}
+
+    deployment = job.deployment
+    machine = job.machine
+    credential = deployment.credential
+    pv = deployment.package_version
+    job_token = f"job{job.pk}"
+
+    def is_cancelled():
+        return Job.objects.filter(pk=job.pk, status=JobStatus.CANCELLED).exists()
+
+    if is_cancelled():
+        # Máy đích vẫn còn service/file tạm từ start() (chưa từng đọc được exit.code nên
+        # chưa ai cleanup) — phải dọn ngay vì sẽ không còn lần poll nào nữa cho job_token này.
+        _cleanup_cancelled_target(job, machine, credential, job_token)
+        release_slot(deployment.id)
+        logger.info("Job %s bị hủy trong lúc collect — dừng, đã dọn máy đích", job_id)
+        return {"job_id": job_id, "status": "cancelled"}
+
+    from apps.deployments.actions import build_action_plan
+
+    plan = build_action_plan(deployment, machine)
+
+    try:
+        cred_password = credential.get_password()
+    except Exception as e:
+        _write_job_result(
+            job,
+            status=JobStatus.FAILED,
+            error_output=f"Không giải mã được credential '{credential.name}': {e}",
+            current_step="collect",
+            finished_at=timezone.now(),
+        )
+        release_slot(deployment.id)
+        logger.error("Giải mã credential lỗi khi collect job %s (%s): %s", job_id, machine.hostname, e)
+        return {"job_id": job_id, "status": "failed", "error": "credential_decrypt_failed"}
+
+    def make_executor(progress_cb=None):
         return PushExecutor(
             host=machine.target_address,
             username=credential.username,
@@ -169,28 +316,30 @@ def _run_job(self, job, deployment, machine, credential, pv):
             cancel_check=is_cancelled,
         )
 
-    executor = make_executor()
+    result = make_executor().poll_once(job_token, success_exit_codes=plan.success_exit_codes)
 
-    result = executor.run(
-        plan.command,
-        local_payload_path=plan.payload_path,
-        payload_filename=plan.payload_filename,
-        success_exit_codes=plan.success_exit_codes,
-        job_token=f"job{job.pk}",
-        extract_payload=plan.extract_payload,
-    )
+    if result is None:
+        deadline = job.started_at + timedelta(seconds=_job_timeout())
+        if timezone.now() >= deadline:
+            _write_job_result(
+                job,
+                status=JobStatus.FAILED,
+                error_output=f"Timeout sau {_job_timeout()}s — installer chưa hoàn tất",
+                current_step="collect",
+                finished_at=timezone.now(),
+            )
+            release_slot(deployment.id)
+            logger.warning("Job %s timeout ở bước collect", job_id)
+            return {"job_id": job_id, "status": "failed", "error": "collect_timeout"}
+        raise self.retry(countdown=_collect_poll_interval())
 
-    # Bị hủy giữa chừng (cancel_check kích hoạt hoặc revoke đặt CANCELLED) → giữ nguyên
-    # CANCELLED, KHÔNG ghi đè FAILED cũng không retry. Đọc lại trạng thái mới nhất từ DB.
-    job.refresh_from_db(fields=["status"])
-    if job.status == JobStatus.CANCELLED:
-        logger.info("Job %s bị hủy trong lúc chạy — dừng", job_id)
-        return {"job_id": job_id, "status": "cancelled"}
+    from apps.audit.models import AuditLog
 
-    # --- Ghi kết quả (gộp vào UPDATE có điều kiện bên dưới, chưa lưu DB ở đây) ---
+    prior_output = job.output or ""
     base_fields = {
         "exit_code": result.exit_code,
-        "output": "\n".join(result.log) + ("\n\n--- STDOUT ---\n" + result.stdout if result.stdout else ""),
+        "output": prior_output + "\n\n--- COLLECT ---\n" + "\n".join(result.log)
+        + ("\n\n--- STDOUT ---\n" + result.stdout if result.stdout else ""),
         "error_output": result.error,
         "current_step": result.step_reached,
         "finished_at": timezone.now(),
@@ -207,6 +356,9 @@ def _run_job(self, job, deployment, machine, credential, pv):
 
         # --- Hậu kiểm cài đặt (chống "false success": installer trả 0 nhưng không cài) ---
         verify_err = _verify_install(make_executor, plan, job)
+        # Release TRƯỚC _write_job_result (không phải sau) để đảm bảo luôn chạy đúng 1 lần
+        # ở mọi nhánh terminal, kể cả khi _write_job_result trả False do bị cancel đúng lúc.
+        release_slot(deployment.id)
         if verify_err:
             fields = {**base_fields, "status": JobStatus.FAILED, "error_output": verify_err, "current_step": "verify"}
             if not _write_job_result(job, **fields):
@@ -235,19 +387,9 @@ def _run_job(self, job, deployment, machine, credential, pv):
         )
         return {"job_id": job_id, "status": job.status, "exit_code": result.exit_code}
 
-    # --- Thất bại: quyết định retry ---
-    # Đếm số lần thử THẬT qua job.attempts (không dùng self.request.retries vì retries
-    # còn tính cả những lần chờ slot concurrency, không phải lỗi thật).
-    # result.retryable=False cho lỗi chắc chắn không tự khỏi (vd sai credential) → không retry.
-    transient = result.step_reached in _TRANSIENT_STEPS and result.retryable
-    if transient and job.attempts <= deployment.retry_limit:
-        if not _write_job_result(job, status=JobStatus.QUEUED, **base_fields):
-            logger.info("Job %s bị hủy đúng lúc xét retry — bỏ qua", job_id)
-            return {"job_id": job_id, "status": "cancelled"}
-        countdown = 30 * (2 ** (job.attempts - 1))  # backoff 30s, 60s, 120s...
-        logger.info("Retry job %s sau %ss (transient: %s)", job_id, countdown, result.error)
-        raise self.retry(countdown=countdown, exc=ExecutorError(result.error))
-
+    # --- Thất bại: "collect" không nằm trong _TRANSIENT_STEPS → luôn FAILED chung cuộc,
+    # không retry (installer tự trả exit code xấu, thử lại cũng vô ích) ---
+    release_slot(deployment.id)
     if not _write_job_result(job, status=JobStatus.FAILED, **base_fields):
         logger.info("Job %s bị hủy đúng lúc ghi thất bại — bỏ qua", job_id)
         return {"job_id": job_id, "status": "cancelled"}
@@ -259,6 +401,28 @@ def _run_job(self, job, deployment, machine, credential, pv):
         error=result.error[:500],
     )
     return {"job_id": job_id, "status": "failed", "error": result.error}
+
+
+def _cleanup_cancelled_target(job, machine, credential, job_token):
+    """Job bị hủy giữa lúc đang collect — máy đích vẫn còn service/file tạm từ start(), dọn
+    ngay vì sẽ không còn ai poll job_token này nữa. Lỗi cleanup chỉ log, không chặn việc trả
+    'cancelled' (giống mọi lỗi cleanup khác trong PushExecutor)."""
+    try:
+        cred_password = credential.get_password()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Không dọn được máy đích cho job %s (giải mã credential lỗi): %s", job.pk, e)
+        return
+    executor = PushExecutor(
+        host=machine.target_address,
+        username=credential.username,
+        password=cred_password,
+        domain=credential.domain,
+        timeout=_job_timeout(),
+    )
+    try:
+        executor.cleanup_now(job_token)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("cleanup_now lỗi cho job %s (%s): %s", job.pk, machine.hostname, e)
 
 
 def _verify_install(make_executor, plan, job):
@@ -371,3 +535,15 @@ def _job_timeout() -> int:
     from django.conf import settings
 
     return settings.RYANDEPLOY.get("JOB_TIMEOUT", 1800)
+
+
+def _collect_poll_interval() -> int:
+    from django.conf import settings
+
+    return settings.RYANDEPLOY.get("COLLECT_POLL_INTERVAL", 12)
+
+
+def _collect_first_delay() -> int:
+    from django.conf import settings
+
+    return settings.RYANDEPLOY.get("COLLECT_FIRST_POLL_DELAY", 5)

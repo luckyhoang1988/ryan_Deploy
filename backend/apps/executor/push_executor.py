@@ -202,17 +202,136 @@ class PushExecutor:
             self._emit(result.step_reached, f"LỖI: {e}")
         finally:
             # 5) CLEANUP (luôn chạy) ----------------------------------------
-            try:
-                self._emit(STEP_CLEANUP, "Dọn dẹp service + file trên máy đích...")
-                self._cleanup(job_token)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Cleanup lỗi trên %s: %s", self.host, e)
-                self._log.append(f"[cleanup] cảnh báo: {e}")
+            self._best_effort_cleanup(job_token)
             self._disconnect()
 
         result.step_reached = STEP_DONE if result.success else result.step_reached
         result.log = list(self._log)
         return result
+
+    def _best_effort_cleanup(self, job_token: str):
+        """Dọn dẹp service+file trên máy đích, nuốt mọi lỗi (chỉ log cảnh báo) — cleanup
+        không bao giờ được làm hỏng kết quả deploy đã có."""
+        try:
+            self._emit(STEP_CLEANUP, "Dọn dẹp service + file trên máy đích...")
+            self._cleanup(job_token)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Cleanup lỗi trên %s: %s", self.host, e)
+            self._log.append(f"[cleanup] cảnh báo: {e}")
+
+    @property
+    def log(self) -> list[str]:
+        return list(self._log)
+
+    # ------------------------------------------------------- start/poll (async collect)
+    def start(
+        self,
+        command: str,
+        *,
+        local_payload_path: Optional[str] = None,
+        payload_filename: Optional[str] = None,
+        job_token: Optional[str] = None,
+        extract_payload: bool = False,
+    ) -> str:
+        """
+        Chạy precheck → copy → execute rồi trả về ngay (KHÔNG chờ cài xong). Service tạm đã
+        được start trên máy đích khi hàm này return thành công — gọi poll_once(job_token)
+        (có thể ở 1 Celery task khác, sau này) để lấy kết quả về.
+
+        Raise ExecutorError (có .step/.retryable) nếu lỗi ở các bước tiền đề này — cleanup
+        được gọi ngay trước khi raise vì sẽ không có poll_once nào chạy sau đó để dọn.
+        """
+        job_token = job_token or uuid.uuid4().hex[:12]
+        step = STEP_PRECHECK
+        try:
+            self._emit(STEP_PRECHECK, f"Kiểm tra SMB {self.smb_port}...")
+            self._precheck()
+
+            self._abort_if_cancelled()
+            step = STEP_COPY
+            self._emit(STEP_COPY, "Kết nối SMB và copy payload...")
+            self._connect()
+            self._copy_payload(
+                job_token, command, local_payload_path, payload_filename, extract_payload
+            )
+
+            self._abort_if_cancelled()
+            step = STEP_EXECUTE
+            self._emit(STEP_EXECUTE, "Tạo service tạm và chạy silent install...")
+            self._execute_via_service(job_token)
+
+            self._emit(STEP_COLLECT, "Đã khởi chạy — chuyển sang chế độ theo dõi không đồng bộ")
+            return job_token
+        except ExecutorError as e:
+            self._emit(step, f"LỖI: {e}")
+            self._best_effort_cleanup(job_token)
+            raise ExecutorError(str(e), retryable=e.retryable, step=step) from e
+        except Exception as e:  # noqa: BLE001
+            logger.exception("PushExecutor.start lỗi trên %s", self.host)
+            self._emit(step, f"LỖI: {e}")
+            self._best_effort_cleanup(job_token)
+            raise ExecutorError(f"Lỗi không mong đợi: {e}", retryable=True, step=step) from e
+        finally:
+            self._disconnect()
+
+    def poll_once(
+        self, job_token: str, success_exit_codes: Optional[list[int]] = None
+    ) -> Optional[ExecResult]:
+        """
+        Mở MỘT kết nối SMB mới, đọc thử exit.code MỘT LẦN (không sleep-loop) — caller (Celery
+        task) tự quyết định retry-hay-hết-hạn giữa các lần gọi. Trả None nếu chưa xong HOẶC
+        tạm thời không kết nối được (máy có thể đang tự reboot giữa lúc cài); trả ExecResult
+        đầy đủ (đã cleanup xong service+file trên máy đích) khi đã có exit.code.
+        """
+        success_exit_codes = success_exit_codes or [0, 3010]
+        try:
+            self._connect()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("poll_once: kết nối lại %s thất bại (thử poll sau): %s", self.host, e)
+            return None
+
+        try:
+            content = self._try_read(self._share_path(job_token, "exit.code"))
+            if content is None:
+                return None
+
+            try:
+                exit_code = int(content.decode("utf-8", "ignore").strip().split()[0])
+            except (ValueError, IndexError):
+                exit_code = -1
+            stdout_raw = self._try_read(self._share_path(job_token, "stdout.log")) or b""
+
+            result = ExecResult(
+                exit_code=exit_code,
+                stdout=stdout_raw.decode("utf-8", "ignore"),
+                success=exit_code in success_exit_codes,
+                needs_reboot=(exit_code == 3010),
+                step_reached=STEP_COLLECT,
+            )
+            if result.success:
+                result.step_reached = STEP_DONE
+            else:
+                result.error = f"Installer trả exit code {exit_code}"
+
+            self._best_effort_cleanup(job_token)
+            result.log = self.log
+            return result
+        finally:
+            self._disconnect()
+
+    def cleanup_now(self, job_token: str) -> None:
+        """Dọn service+file trên máy đích ngay — dùng khi job bị hủy giữa lúc đang poll (máy
+        đích vẫn còn service/file tạm từ start(), chưa từng đọc được exit.code nên poll_once
+        sẽ không tự dọn)."""
+        try:
+            self._connect()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("cleanup_now: không kết nối được %s để dọn dẹp: %s", self.host, e)
+            return
+        try:
+            self._best_effort_cleanup(job_token)
+        finally:
+            self._disconnect()
 
     # ------------------------------------------------------------- step impls
     def _precheck(self):
@@ -484,12 +603,14 @@ class ExecutorError(Exception):
     """Lỗi có kiểm soát trong quá trình đẩy.
 
     retryable=False đánh dấu lỗi chắc chắn không tự khỏi khi thử lại (vd sai credential),
-    để caller khỏi retry vô ích.
+    để caller khỏi retry vô ích. `step` = bước xảy ra lỗi (precheck/copy/execute) — dùng bởi
+    start() để caller phân loại transient/không mà không cần một ExecResult đầy đủ.
     """
 
-    def __init__(self, message: str, *, retryable: bool = True):
+    def __init__(self, message: str, *, retryable: bool = True, step: Optional[str] = None):
         super().__init__(message)
         self.retryable = retryable
+        self.step = step or STEP_PRECHECK
 
 
 class CancelledError(ExecutorError):

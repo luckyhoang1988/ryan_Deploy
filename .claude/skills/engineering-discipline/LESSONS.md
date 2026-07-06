@@ -14,6 +14,55 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-06 — Tách blocking collect-loop khỏi PushExecutor: chuỗi start()/poll_once() qua 2 Celery task, 2 gotcha ordering dưới eager mode
+**Bối cảnh:** `PushExecutor.run()` (executor.py) chiếm 1 Celery worker process suốt toàn bộ
+thời gian cài đặt (tới 30 phút, `_collect_result` sleep-poll SMB mỗi 3s trong 1 task duy
+nhất) — giới hạn số máy cài song song thực tế bằng số worker process, bất kể
+`Deployment.max_concurrency`. Tách thành `start()` (precheck/copy/execute, nhanh) +
+`poll_once()` (đọc exit.code 1 lần, không sleep-loop) trong `push_executor.py`, và tách
+`deploy_to_machine` thành `_start_and_dispatch` + `collect_job_result` (task Celery mới tự
+`self.retry(countdown=...)` để nhường worker giữa các lần poll) trong `jobs/tasks.py`.
+**Bài học:**
+1. **Đổi return-value contract của task khi tách hàm dễ làm mất field mà caller/test dựa
+   vào.** Bản nháp đầu tách `_run_job`→`_start_and_dispatch` trả `bool` (handed_off) thay vì
+   dict gốc `{"status":..., "error":...}` — làm `deploy_to_machine` trả `{"status":"handled"}`
+   chung chung, vỡ `test_credential_failure.py` vốn assert `result["status"]=="failed"` và
+   `result["error"]=="credential_decrypt_failed"`. Sửa: giữ nguyên dict trả về ở MỌI nhánh
+   (kể cả nhánh mới "collecting"), suy ra `handed_off` từ `result.get("status")=="collecting"`
+   thay vì có 1 biến bool riêng. Khi tách 1 hàm nội bộ có return-value được test/caller dựa
+   vào từng field cụ thể, đừng đơn giản hoá kiểu trả về (bool/None) chỉ vì logic mới "chỉ cần
+   biết có/không" — vẫn phải trả đủ shape cũ.
+2. **`CELERY_TASK_ALWAYS_EAGER=True` (settings.test) làm `apply_async()` chạy task MỚI ĐỒNG BỘ
+   TỚI HẾT (kể cả các `self.retry()` đệ quy bên trong) trước khi trả về** — không chỉ
+   `.delay()`+`.get()` mới eager, mà bất kỳ `apply_async()` nào không gọi `.get()` cũng vẫn
+   chạy xong toàn bộ trước khi statement tiếp theo chạy. Code ban đầu gọi
+   `collect_job_result.apply_async(...)` RỒI MỚI `Job.objects.filter(...).update(output=...,
+   celery_task_id=async_result.id)` — dưới eager, `collect_job_result` (và mọi lần retry của
+   nó) đã ghi xong kết quả CUỐI CÙNG trước khi dòng `update()` đó chạy, nên nó ĐÈ LÊN log
+   collect vừa ghi bằng log start() cũ (mất log collect) và set `celery_task_id` thành 1 giá
+   trị của task đã xong từ lâu. Production (broker thật) không lộ bug này vì `apply_async` chỉ
+   enqueue message rồi return ngay (task chưa chạy), che giấu race. Fix: tự sinh `task_id =
+   uuid.uuid4().hex`, ghi DB (`output`, `celery_task_id=task_id`) TRƯỚC, rồi mới
+   `apply_async(..., task_id=task_id)` — loại bỏ phụ thuộc thứ tự thực thi giữa 2 môi trường
+   thay vì dựa vào `async_result.id` (chỉ có SAU khi gọi, và dưới eager thì "sau" nghĩa là
+   "sau khi task đã chạy xong").
+3. **Monkeypatch 1 method lên class fake trong 1 test rồi `del` để "khôi phục" là SAI** — nếu
+   gán `_FakeExecutor.start = new_func` (ghi đè hẳn, không phải wrap), `del
+   _FakeExecutor.start` xoá luôn thuộc tính, không "lộ lại" method gốc định nghĩa trong class
+   body (không có gì để lộ lại — đã bị ghi đè mất). Test sau đó gọi `.start()` sẽ
+   `AttributeError`. Phải lưu `orig = _FakeExecutor.start` trước khi gán đè, và khôi phục bằng
+   `_FakeExecutor.start = orig` trong `finally`, không dùng `del`.
+**Áp dụng:** Khi thay 1 vòng lặp block-worker bằng mô hình "start rồi tự poll qua
+self.retry()", tách state cần thiết để RESUME (ở đây: `job_token` deterministic
+`f"job{job.pk}"` có sẵn, không cần field DB mới) khỏi state chỉ tồn tại trong biến cục
+bộ/instance (log của executor) — cái sau phải ghi xuống DB TRƯỚC KHI giao việc cho task tiếp
+theo, không phải sau, để không phụ thuộc thứ tự thực thi giữa eager/broker thật. Khi test
+Celery task tự retry bằng cách mock: luôn tự hỏi "dưới eager mode, dòng code SAU
+apply_async()/self.retry() có bị đối thủ ghi đè trước không" trước khi tin thứ tự viết trong
+code nguồn phản ánh đúng thứ tự chạy thực tế.
+
+---
+
 ## 2026-07-06 — Sửa 10 finding High từ báo cáo review; 3 gotcha môi trường phải verify trước khi code
 **Bối cảnh:** Sau khi vá xong 3 Critical, tiếp tục 10 finding High (core/credentials/machines/
 deployments/jobs/executor/audit/frontend) từ cùng báo cáo review. Trước khi viết fix, verify

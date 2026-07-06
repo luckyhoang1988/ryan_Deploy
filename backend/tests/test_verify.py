@@ -36,24 +36,37 @@ def _job(credential, pv):
 
 
 class _FakeExecutor:
-    """run() lần 1 = install (theo install_result), lần 2 = verify (theo verify_result)."""
+    """
+    start() = khởi chạy install (không trả kết quả); poll_once() lần đầu trả về
+    install_result (giả lập cài xong ngay ở lần poll đầu tiên); run() = verify (theo
+    verify_result) — verify vẫn dùng run() cũ, chỉ install/collect đổi sang start/poll_once.
+    """
 
     install_result = None
     verify_result = None
     commands = []
+    log = []
 
     def __init__(self, **kw):
         pass
 
-    def run(self, command, **kw):
-        idx = len(_FakeExecutor.commands)
+    def start(self, command, **kw):
         _FakeExecutor.commands.append(command)
-        return _FakeExecutor.install_result if idx == 0 else _FakeExecutor.verify_result
+        return "faketoken"
+
+    def poll_once(self, job_token, **kw):
+        return _FakeExecutor.install_result
+
+    def run(self, command, **kw):
+        _FakeExecutor.commands.append(command)
+        return _FakeExecutor.verify_result
 
 
 @pytest.fixture(autouse=True)
 def _patch(monkeypatch):
-    # Không SMB thật + không Redis: mock executor và semaphore.
+    # Không SMB thật + không Redis: mock executor và semaphore. eager mode chạy
+    # collect_job_result.apply_async(...) ĐỒNG BỘ ngay trong deploy_to_machine.apply() (xem
+    # LESSONS.md/plan) nên 1 lần .apply().get() vẫn chạy trọn chuỗi start→poll→verify.
     _FakeExecutor.commands = []
     monkeypatch.setattr("apps.jobs.tasks.PushExecutor", _FakeExecutor)
     monkeypatch.setattr("apps.deployments.semaphore.acquire_slot", lambda *a, **k: True)
