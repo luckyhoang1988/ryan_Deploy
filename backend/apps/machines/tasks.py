@@ -3,6 +3,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 
 from celery import shared_task
+from django.conf import settings
 from django.db import connections
 
 from .ad_sync import sync_computers_from_ad
@@ -48,7 +49,8 @@ def check_all_online():
     if not machines:
         return {"checked": 0, "online": 0}
 
-    with ThreadPoolExecutor(max_workers=32) as pool:
+    max_workers = settings.RYANDEPLOY.get("MACHINE_ONLINE_SCAN_WORKERS", 64)
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
         results = list(pool.map(_refresh_and_close, machines))
 
     online = sum(1 for r in results if r)

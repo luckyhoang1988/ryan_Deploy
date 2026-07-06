@@ -189,6 +189,11 @@ RYANDEPLOY = {
     # --- Catalog / Auto Download ---
     # Timeout (giây) khi tải installer từ URL ngoài (downloader.py).
     "DOWNLOAD_TIMEOUT": env_int("RYANDEPLOY_DOWNLOAD_TIMEOUT", 300),
+    # --- Machine online-check ---
+    # Số luồng song song khi quét is_online toàn bộ máy enabled (xem apps.machines.tasks).
+    # Mặc định 64 (tăng từ 32 hardcode cũ) vì mỗi máy giờ có thể tốn tới ~5.5s worst-case
+    # (ping + TCP 135 + TCP 445) thay vì chỉ 1 TCP check trước đây.
+    "MACHINE_ONLINE_SCAN_WORKERS": env_int("RYANDEPLOY_MACHINE_ONLINE_SCAN_WORKERS", 64),
 }
 
 # Chặn body form phi-file quá lớn (không áp cho file upload — file đã có trần riêng ở

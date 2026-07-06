@@ -31,3 +31,8 @@ cryptography==42.0.8
 
 # --- Server monitoring (CPU/RAM real-time) ---
 psutil==6.1.1
+
+# --- Machine connectivity check (ICMP ping) ---
+# Pure Python, raw ICMP socket (privileged=True), không phụ thuộc binary `ping` hệ thống.
+# Cần chạy dưới quyền root/CAP_NET_RAW (container mặc định đã có — xem connectivity.py).
+icmplib==3.0.4
