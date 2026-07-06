@@ -425,26 +425,41 @@ class PushExecutor:
         except Exception:
             pass
 
-    def _delete_exec_dir(self, job_token: str):
+    def _delete_recursive(self, path: str):
+        """
+        Xóa đệ quy 1 thư mục trên share ADMIN$ — impacket không có xóa đệ quy sẵn
+        (deleteDirectory yêu cầu thư mục rỗng). Cần cho thư mục con "extracted" (deploy
+        dạng archive .zip) có thể chứa cây thư mục lồng nhau tuỳ nội dung archive.
+        """
         conn = self._conn
-        exec_dir = self._share_path(job_token)
-        # Xóa mọi file còn lại (VD installer) rồi xóa thư mục các cấp
         try:
-            for f in conn.listPath(self.ADMIN_SHARE, exec_dir + "\\*"):
-                fname = f.get_longname()
-                if fname in (".", ".."):
-                    continue
-                self._safe_delete_file(exec_dir + "\\" + fname)
+            entries = conn.listPath(self.ADMIN_SHARE, path + "\\*")
+        except Exception:
+            return
+        for e in entries:
+            name = e.get_longname()
+            if name in (".", ".."):
+                continue
+            full = path + "\\" + name
+            if e.is_directory():
+                self._delete_recursive(full)
+            else:
+                self._safe_delete_file(full)
+        try:
+            conn.deleteDirectory(self.ADMIN_SHARE, path)
         except Exception:
             pass
-        for d in (
-            f"{self.target_dir}\\{job_token}\\exec",
-            f"{self.target_dir}\\{job_token}",
-        ):
-            try:
-                conn.deleteDirectory(self.ADMIN_SHARE, d)
-            except Exception:
-                pass
+
+    def _delete_exec_dir(self, job_token: str):
+        exec_dir = self._share_path(job_token)
+        # Đệ quy vì thư mục "extracted" (tạo khi extract_payload=True) có thể chứa cây
+        # thư mục lồng nhau tuỳ nội dung archive — xóa flat cấp trên cùng sẽ để lại rác
+        # vĩnh viễn trên máy đích (deleteFile fail âm thầm trên thư mục con).
+        self._delete_recursive(exec_dir)
+        try:
+            self._conn.deleteDirectory(self.ADMIN_SHARE, f"{self.target_dir}\\{job_token}")
+        except Exception:
+            pass
 
     def _disconnect(self):
         if self._conn is not None:

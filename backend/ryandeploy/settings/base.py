@@ -174,6 +174,10 @@ CORS_ALLOW_ALL_ORIGINS = DEBUG
 # ============================================================
 RYANDEPLOY = {
     "VAULT_KEY": env("RYANDEPLOY_VAULT_KEY"),
+    # Chỉ dev.py/test.py bật True — cho phép vault.py derive key tạm từ SECRET_KEY khi
+    # thiếu VAULT_KEY. KHÔNG dùng settings.DEBUG để gate: pytest-django tự ép DEBUG=False
+    # cho MỌI test bất kể giá trị thật trong settings module, nên phải dùng cờ riêng.
+    "VAULT_DEV_FALLBACK": False,
     "TARGET_DIR": env("RYANDEPLOY_TARGET_DIR", r"RyanDeploy\Runner"),
     "SERVICE_PREFIX": env("RYANDEPLOY_SERVICE_PREFIX", "RyanDeployRunner"),
     "MAX_CONCURRENCY": env_int("RYANDEPLOY_MAX_CONCURRENCY", 15),

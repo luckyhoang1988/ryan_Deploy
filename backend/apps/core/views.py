@@ -1,6 +1,6 @@
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import Q
 from django.middleware.csrf import get_token
 from rest_framework import status, viewsets
@@ -9,6 +9,8 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
+
+from apps.audit.models import AuditLog
 
 from .permissions import ROLE_ADMIN, IsAdminStrict, has_role, user_roles
 from .serializers import UserSerializer
@@ -258,14 +260,28 @@ class UserViewSet(viewsets.ModelViewSet):
             return role == ROLE_ADMIN
         return user.groups.filter(name=ROLE_ADMIN).exists()
 
-    def _other_admins_exist(self, exclude_pk):
-        qs = (
+    def _locked_admin_capable(self):
+        """
+        Khoá (select_for_update) toàn bộ user admin-capable HIỆN TẠI theo pk — dùng để
+        tuần tự hoá 2 request hạ quyền/xoá admin cuối cùng chạy đồng thời (TOCTOU race).
+        Query id trước rồi khoá theo pk__in (tránh lỗi Postgres "SELECT FOR UPDATE không
+        cho phép với DISTINCT" do join qua groups__name). Trả về list User object MỚI đọc
+        sau khi giành lock — phản ánh đúng trạng thái đã commit của giao dịch chạy trước,
+        không phải state đọc trước khi khoá.
+
+        Lưu ý: SQLite (dùng cho test) không hỗ trợ SELECT FOR UPDATE — Django âm thầm bỏ
+        qua khoá thay vì raise lỗi, nên test chỉ xác nhận code path chạy đúng, KHÔNG chứng
+        minh được race thật sự bị chặn (production dùng PostgreSQL, có khoá thật).
+        """
+        admin_ids = list(
             User.objects.filter(is_active=True)
             .filter(Q(is_superuser=True) | Q(groups__name=ROLE_ADMIN))
-            .exclude(pk=exclude_pk)
+            .values_list("pk", flat=True)
             .distinct()
         )
-        return qs.exists()
+        if not admin_ids:
+            return []
+        return list(User.objects.select_for_update().filter(pk__in=admin_ids).order_by("pk"))
 
     def perform_update(self, serializer):
         instance = serializer.instance
@@ -273,13 +289,46 @@ class UserViewSet(viewsets.ModelViewSet):
         new_role = serializer.validated_data.get("role")  # None nếu không đổi
         was_admin = self._is_admin_capable(instance)
         will_be_admin = self._is_admin_capable(instance, is_active=new_active, role=new_role)
-        if was_admin and not will_be_admin and not self._other_admins_exist(instance.pk):
-            raise ValidationError("Không thể hạ quyền/khoá admin cuối cùng — hệ thống sẽ mất quản trị.")
-        serializer.save()
+        if was_admin and not will_be_admin:
+            with transaction.atomic():
+                locked = self._locked_admin_capable()
+                other_admins = [
+                    u for u in locked if u.pk != instance.pk and self._is_admin_capable(u)
+                ]
+                if not other_admins:
+                    raise ValidationError(
+                        "Không thể hạ quyền/khoá admin cuối cùng — hệ thống sẽ mất quản trị."
+                    )
+                serializer.save()
+        else:
+            serializer.save()
+        AuditLog.record(
+            AuditLog.Action.USER_UPDATE,
+            user=self.request.user,
+            target=instance,
+            role=new_role,
+            is_active=new_active,
+        )
 
     def perform_destroy(self, instance):
         if instance.pk == self.request.user.pk:
             raise ValidationError("Không thể xoá chính tài khoản đang đăng nhập.")
-        if self._is_admin_capable(instance) and not self._other_admins_exist(instance.pk):
-            raise ValidationError("Không thể xoá admin cuối cùng.")
-        instance.delete()
+        username = instance.username
+        if self._is_admin_capable(instance):
+            with transaction.atomic():
+                locked = self._locked_admin_capable()
+                other_admins = [
+                    u for u in locked if u.pk != instance.pk and self._is_admin_capable(u)
+                ]
+                if not other_admins:
+                    raise ValidationError("Không thể xoá admin cuối cùng.")
+                # Ghi log TRƯỚC khi xoá để giữ được pk/username trong bản ghi kiểm toán.
+                AuditLog.record(
+                    AuditLog.Action.USER_DELETE, user=self.request.user, target=instance, username=username
+                )
+                instance.delete()
+        else:
+            AuditLog.record(
+                AuditLog.Action.USER_DELETE, user=self.request.user, target=instance, username=username
+            )
+            instance.delete()

@@ -1,0 +1,74 @@
+"""
+reconcile_stuck_deployments phải tự phát hiện job "ma" kẹt RUNNING sau worker crash
+(acks_late redeliver thấy claim fail, coi là "đã xử lý" rồi return êm — không ai từng ghi
+FAILED cho job đó) và đánh FAILED, thay vì bỏ qua deployment vô thời hạn.
+"""
+from datetime import timedelta
+
+import pytest
+from django.utils import timezone
+
+from apps.credentials.models import DeployCredential
+from apps.deployments.models import Deployment, DeploymentStatus
+from apps.deployments.tasks import reconcile_stuck_deployments
+from apps.jobs.models import Job, JobStatus
+from apps.machines.models import Machine
+from apps.packages.models import InstallerType, Package, PackageVersion
+
+
+@pytest.fixture(autouse=True)
+def _no_redis(monkeypatch):
+    # Không phụ thuộc Redis thật trong test — chỉ cần biết release_slot có được gọi không.
+    calls = []
+    monkeypatch.setattr("apps.deployments.semaphore.release_slot", lambda dep_id: calls.append(dep_id))
+    return calls
+
+
+@pytest.fixture
+def deployment(db):
+    pkg = Package.objects.create(name="Office")
+    pv = PackageVersion.objects.create(
+        package=pkg, version="2024", installer_file="repository/x/2024/setup.exe",
+        installer_type=InstallerType.EXE,
+    )
+    cred = DeployCredential.objects.create(name="svc", username="svc_deploy")
+    dep = Deployment.objects.create(
+        name="Rollout", package_version=pv, credential=cred, status=DeploymentStatus.RUNNING
+    )
+    dep.started_at = timezone.now()
+    dep.save(update_fields=["started_at"])
+    return dep
+
+
+def test_fresh_running_job_is_untouched(deployment):
+    m = Machine.objects.create(hostname="PC-1")
+    job = Job.objects.create(
+        deployment=deployment, machine=m, status=JobStatus.RUNNING,
+        started_at=timezone.now() - timedelta(minutes=5),  # mới, chưa quá timeout
+    )
+    reconcile_stuck_deployments()
+    job.refresh_from_db()
+    deployment.refresh_from_db()
+    assert job.status == JobStatus.RUNNING
+    assert deployment.status == DeploymentStatus.RUNNING
+
+
+def test_stale_running_job_marked_failed_and_deployment_finalized(deployment, _no_redis):
+    m1 = Machine.objects.create(hostname="PC-1")
+    m2 = Machine.objects.create(hostname="PC-2")
+    stale_job = Job.objects.create(
+        deployment=deployment, machine=m1, status=JobStatus.RUNNING,
+        started_at=timezone.now() - timedelta(hours=1),  # quá timeout (mặc định 30 phút + 5 phút dư)
+    )
+    Job.objects.create(deployment=deployment, machine=m2, status=JobStatus.SUCCESS)
+
+    result = reconcile_stuck_deployments()
+
+    stale_job.refresh_from_db()
+    deployment.refresh_from_db()
+    assert stale_job.status == JobStatus.FAILED
+    assert "watchdog" in stale_job.error_output.lower()
+    assert deployment.status == DeploymentStatus.COMPLETED_WITH_ERRORS  # 1 success + 1 failed
+    assert result["stale_jobs_failed"] == 1
+    assert result["reconciled"] == 1
+    assert deployment.id in _no_redis  # release_slot đã được gọi cho job kẹt

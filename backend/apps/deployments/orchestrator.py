@@ -46,6 +46,13 @@ def launch_deployment(deployment) -> int:
                 "error_output": "",
                 "current_step": "",
                 "finished_at": None,
+                # Reset bookkeeping từ lần chạy trước — thiếu bước này thì retrigger sau khi
+                # đã hết retry_limit ở lượt trước sẽ kế thừa attempts cũ và mất hết lượt retry
+                # ngay từ job đầu của lượt mới (job.attempts <= deployment.retry_limit ở
+                # jobs/tasks.py so với giá trị cũ còn sót lại).
+                "attempts": 0,
+                "started_at": None,
+                "celery_task_id": "",
             },
         )
         job_ids.append(job.pk)

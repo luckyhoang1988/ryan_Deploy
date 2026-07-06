@@ -222,7 +222,7 @@ class UpdateDeployView(APIView):
 
     def post(self, request, package_id=None):
         from apps.credentials.models import DeployCredential
-        from apps.deployments.models import Deployment, DeploymentAction
+        from apps.deployments.models import Deployment, DeploymentAction, DeploymentStatus
         from apps.deployments.orchestrator import launch_deployment
 
         package = Package.objects.filter(pk=package_id).first()
@@ -272,13 +272,22 @@ class UpdateDeployView(APIView):
         try:
             job_count = launch_deployment(deployment)
         except Exception:
-            deployment.status = "failed"
+            deployment.status = DeploymentStatus.FAILED
             deployment.finished_at = timezone.now()
             deployment.save(update_fields=["status", "finished_at"])
             return Response(
                 {"detail": "Không kích hoạt được deployment (lỗi hệ thống)."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+        if job_count == 0:
+            # Máy có thể bị disable/loại khỏi targeting giữa lúc outdated_machine_ids() và
+            # resolve_targets() chạy — không có gì để đẩy. Đóng deployment lại (khớp pattern
+            # đã dùng ở DeploymentViewSet.trigger/deployments/tasks.py), tránh kẹt DRAFT
+            # vĩnh viễn (Deployment.objects.create() ở trên mặc định status=DRAFT).
+            deployment.status = DeploymentStatus.COMPLETED
+            deployment.finished_at = timezone.now()
+            deployment.save(update_fields=["status", "finished_at"])
 
         return Response(
             {

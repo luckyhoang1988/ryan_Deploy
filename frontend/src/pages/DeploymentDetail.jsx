@@ -17,6 +17,7 @@ export default function DeploymentDetail() {
   const [jobs, setJobs] = useState([]);
   const [selected, setSelected] = useState(null);
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState("");
 
   const load = async () => {
     try {
@@ -63,16 +64,34 @@ export default function DeploymentDetail() {
   const retrigger = async () => {
     // Xác nhận trước: chạy lại có thể đẩy tới hàng trăm máy — tránh click nhầm.
     if (!window.confirm(`Chạy lại deployment "${dep.name}"? Sẽ đẩy tới các máy đích.`)) return;
-    await api.post(`/deployments/${id}/trigger/`, {});
-    load();
+    setBusy("trigger");
+    setErr("");
+    try {
+      await api.post(`/deployments/${id}/trigger/`, {});
+      load();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy("");
+    }
   };
   const cancel = async () => {
     if (!window.confirm(`Hủy deployment "${dep.name}"? Các job đang chạy sẽ bị dừng.`)) return;
-    await api.post(`/deployments/${id}/cancel/`, {});
-    load();
+    setBusy("cancel");
+    setErr("");
+    try {
+      await api.post(`/deployments/${id}/cancel/`, {});
+      load();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy("");
+    }
   };
 
-  if (err) return <p className="error">{err}</p>;
+  // err chỉ gate toàn trang khi CHƯA có dep (lỗi ở lần load đầu) — lỗi từ retrigger/cancel
+  // sau khi đã có dep hiển thị inline bên dưới, không được xoá mất toàn bộ trang.
+  if (err && !dep) return <p className="error">{err}</p>;
   if (!dep) return <p>Đang tải…</p>;
 
   return (
@@ -85,12 +104,14 @@ export default function DeploymentDetail() {
         <div className="row">
           {canWrite && (
             <>
-              <button className="btn ghost" onClick={retrigger}>Chạy lại</button>
-              <button className="btn danger" onClick={cancel}>Hủy</button>
+              <button className="btn ghost" onClick={retrigger} disabled={!!busy}>Chạy lại</button>
+              <button className="btn danger" onClick={cancel} disabled={!!busy}>Hủy</button>
             </>
           )}
         </div>
       </div>
+
+      {err && <p className="error">{err}</p>}
 
       <div className="row" style={{ gap: 20 }}>
         <div><span className="muted">Package: </span>{dep.package_name} {dep.version}</div>

@@ -1,5 +1,6 @@
 """Celery tasks cấp deployment (khác apps/jobs/tasks.py là cấp từng job)."""
 import logging
+from datetime import timedelta
 
 from celery import shared_task
 from django.db import transaction
@@ -14,6 +15,11 @@ logger = logging.getLogger("apps.deployments")
 # bị kill sau khi claim SCHEDULED→RUNNING nhưng trước khi tạo job) → coi là kẹt, đánh FAILED.
 # launch tạo job trong vài giây nên ngưỡng này chỉ chạm khi thực sự có sự cố.
 _STUCK_NO_JOB_SECONDS = 600  # 10 phút
+
+# Job RUNNING quá job_timeout + khoảng dư này mà vẫn chưa terminal → nghi worker crash
+# giữa chừng (acks_late redeliver thấy claim fail, coi là "đã xử lý" rồi return êm — không
+# ai từng ghi FAILED). Khớp ttl = _job_timeout() + 300 đã dùng ở deploy_to_machine.
+_STUCK_JOB_GRACE_SECONDS = 300
 
 
 @shared_task
@@ -79,8 +85,9 @@ def reconcile_stuck_deployments():
     deployment sẽ kẹt ở RUNNING vĩnh viễn. Task này quét các deployment RUNNING mà
     MỌI job đã ở trạng thái kết thúc rồi gọi finalize để tổng kết lại.
     """
+    from apps.deployments.semaphore import release_slot
     from apps.jobs.models import Job, JobStatus
-    from apps.jobs.tasks import finalize_deployment
+    from apps.jobs.tasks import _job_timeout, finalize_deployment
 
     terminal = [
         JobStatus.SUCCESS,
@@ -90,8 +97,10 @@ def reconcile_stuck_deployments():
         JobStatus.CANCELLED,
     ]
     now = timezone.now()
+    stale_cutoff = now - timedelta(seconds=_job_timeout() + _STUCK_JOB_GRACE_SECONDS)
     reconciled = 0
     failed = 0
+    stale_jobs_failed = 0
     for dep_id, started_at in Deployment.objects.filter(
         status=DeploymentStatus.RUNNING
     ).values_list("id", "started_at"):
@@ -110,13 +119,35 @@ def reconcile_stuck_deployments():
                     "Reconcile: deployment %s RUNNING %.0fs mà chưa có job → FAILED", dep_id, age
                 )
             continue
+
+        # Job "ma": worker crash giữa lúc job đã claim RUNNING — acks_late redeliver thấy
+        # claim fail (job không còn QUEUED) và coi là "đã xử lý", return êm mà không ai
+        # từng ghi FAILED. Không có watchdog thì job này (và deployment chứa nó) kẹt
+        # RUNNING vĩnh viễn — tự đánh FAILED nếu đã quá hạn rõ ràng trước khi xét terminal.
+        for job in jobs.filter(status=JobStatus.RUNNING, started_at__lt=stale_cutoff):
+            updated = Job.objects.filter(pk=job.pk, status=JobStatus.RUNNING).update(
+                status=JobStatus.FAILED,
+                error_output=(
+                    "Job kẹt RUNNING quá timeout — nghi worker crash giữa chừng, "
+                    "watchdog tự đánh FAILED."
+                ),
+                finished_at=now,
+            )
+            if updated:
+                release_slot(dep_id)  # job có thể đang giữ slot semaphore, phải nhả
+                stale_jobs_failed += 1
+                logger.warning(
+                    "Reconcile: job %s (deployment %s) kẹt RUNNING quá timeout → FAILED",
+                    job.pk, dep_id,
+                )
+
         if jobs.exclude(status__in=terminal).exists():
             continue  # còn job đang chạy → chưa xong, không đụng
         finalize_deployment(None, dep_id)
         reconciled += 1
         logger.info("Reconcile: tổng kết lại deployment kẹt RUNNING %s", dep_id)
 
-    return {"reconciled": reconciled, "failed": failed}
+    return {"reconciled": reconciled, "failed": failed, "stale_jobs_failed": stale_jobs_failed}
 
 
 @shared_task

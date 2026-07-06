@@ -1,4 +1,5 @@
 import io
+import zipfile
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -107,3 +108,58 @@ def test_verify_integrity_no_hash_skips(tmp_path):
     p.write_bytes(b"whatever")
     ok, _ = repository.verify_integrity(_FakePV(str(p), ""))
     assert ok  # không có hash lưu -> bỏ qua kiểm tra
+
+
+def _make_zip(entries: dict[str, bytes], compress=zipfile.ZIP_DEFLATED) -> io.BytesIO:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compress) as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+    buf.seek(0)
+    return buf
+
+
+def test_validate_zip_archive_accepts_normal_zip():
+    z = _make_zip({"setup.exe": b"MZ-fake", "configuration.xml": b"<config/>"})
+    repository.validate_zip_archive(z, max_total_uncompressed_bytes=10 * 1024 * 1024)  # không raise
+
+
+def test_validate_zip_archive_rejects_path_traversal():
+    z = _make_zip({"../../evil.exe": b"payload"})
+    with pytest.raises(ValueError, match="đường dẫn không an toàn"):
+        repository.validate_zip_archive(z, max_total_uncompressed_bytes=10 * 1024 * 1024)
+
+
+def test_validate_zip_archive_rejects_absolute_path():
+    z = _make_zip({"C:\\Windows\\System32\\evil.dll": b"payload"})
+    with pytest.raises(ValueError, match="đường dẫn không an toàn"):
+        repository.validate_zip_archive(z, max_total_uncompressed_bytes=10 * 1024 * 1024)
+
+
+def test_validate_zip_archive_rejects_zip_bomb_ratio():
+    # 50MB toàn số 0 nén cực tốt -> tỉ lệ nén vượt xa ngưỡng cho phép.
+    z = _make_zip({"bomb.bin": b"\x00" * (50 * 1024 * 1024)})
+    with pytest.raises(ValueError, match="zip bomb"):
+        repository.validate_zip_archive(z, max_total_uncompressed_bytes=1024 * 1024 * 1024)
+
+
+def test_validate_zip_archive_rejects_total_size_over_cap():
+    z = _make_zip({"a.bin": b"A" * 2000, "b.bin": b"B" * 2000}, compress=zipfile.ZIP_STORED)
+    with pytest.raises(ValueError, match="Tổng dung lượng"):
+        repository.validate_zip_archive(z, max_total_uncompressed_bytes=1000)
+
+
+def test_validate_zip_archive_rejects_bad_zip():
+    with pytest.raises(ValueError, match="không phải archive"):
+        repository.validate_zip_archive(io.BytesIO(b"not a zip"), max_total_uncompressed_bytes=1024)
+
+
+def test_serializer_rejects_malicious_zip_upload(db, settings, tmp_path):
+    settings.MEDIA_ROOT = str(tmp_path)
+    pkg = Package.objects.create(name="Office2016")
+    evil = SimpleUploadedFile(
+        "Office2016.zip", _make_zip({"../../evil.exe": b"payload"}).getvalue()
+    )
+    s = PackageVersionSerializer(data={"package": pkg.id, "version": "1", "installer_file": evil})
+    assert not s.is_valid()
+    assert "installer_file" in s.errors

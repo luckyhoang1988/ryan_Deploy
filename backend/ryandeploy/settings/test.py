@@ -3,6 +3,7 @@ from .base import *  # noqa: F401,F403
 
 DEBUG = True
 ALLOWED_HOSTS = ["*", "testserver"]
+RYANDEPLOY = {**RYANDEPLOY, "VAULT_DEV_FALLBACK": True}  # noqa: F405
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",

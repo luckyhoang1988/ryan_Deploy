@@ -43,6 +43,21 @@ class PackageVersionSerializer(serializers.ModelSerializer):
             )
         return upload
 
+    def validate(self, attrs):
+        # Archive .zip sẽ bị PushExecutor giải nén (tar.exe, quyền SYSTEM) trên MỌI máy
+        # đích -> chặn zip-slip/zip-bomb NGAY tại đây, trước khi archive kịp lưu vào
+        # repository và có cơ hội được đẩy ra fleet.
+        upload = attrs.get("installer_file")
+        if upload is not None:
+            itype = attrs.get("installer_type") or repository.detect_installer_type(upload.name)
+            if itype == InstallerType.ZIP:
+                max_mb = settings.RYANDEPLOY.get("MAX_INSTALLER_MB", 2048)
+                try:
+                    repository.validate_zip_archive(upload, max_mb * 10 * 1024 * 1024)
+                except ValueError as e:
+                    raise serializers.ValidationError({"installer_file": str(e)})
+        return attrs
+
     class Meta:
         model = PackageVersion
         fields = [

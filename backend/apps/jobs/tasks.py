@@ -142,7 +142,21 @@ def _run_job(self, job, deployment, machine, credential, pv):
 
     # Factory: dùng cho lần chạy chính và lần hậu kiểm (mỗi lần 1 instance sạch, tránh
     # gộp log giữa hai lần chạy). Giải mã mật khẩu 1 lần.
-    cred_password = credential.get_password()
+    try:
+        cred_password = credential.get_password()
+    except Exception as e:
+        # Sai/xoay VAULT_KEY hoặc ciphertext hỏng -> decrypt ném lỗi. Không bắt thì
+        # exception thoát khỏi Celery task, job đã claim RUNNING (dòng 77-82) sẽ kẹt
+        # vĩnh viễn vì không còn chỗ nào ghi FAILED. Lỗi không tự khỏi khi retry.
+        _write_job_result(
+            job,
+            status=JobStatus.FAILED,
+            error_output=f"Không giải mã được credential '{credential.name}': {e}",
+            current_step="precheck",
+            finished_at=timezone.now(),
+        )
+        logger.error("Giải mã credential lỗi cho job %s (%s): %s", job_id, machine.hostname, e)
+        return {"job_id": job_id, "status": "failed", "error": "credential_decrypt_failed"}
 
     def make_executor(progress_cb=progress):
         return PushExecutor(

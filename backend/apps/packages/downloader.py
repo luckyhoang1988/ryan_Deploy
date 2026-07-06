@@ -21,6 +21,7 @@ from django.utils import timezone
 from . import repository
 from .models import (
     AutoDownloadPolicy,
+    InstallerType,
     PackageDownload,
     PackageVersion,
     VersionSource,
@@ -188,6 +189,16 @@ def fetch(package, url: str, version: str, requested_by=None) -> PackageDownload
             )
 
         itype = repository.detect_installer_type(filename)
+        if itype == InstallerType.ZIP:
+            # Cùng lỗ hổng zip-slip/zip-bomb như upload thủ công (serializers.py), nhưng
+            # đường tải-từ-URL này KHÔNG đi qua PackageVersionSerializer nên phải tự kiểm.
+            max_mb = cfg.get("MAX_INSTALLER_MB", 2048)
+            with open(temp_path, "rb") as fh:
+                try:
+                    repository.validate_zip_archive(fh, max_mb * 10 * 1024 * 1024)
+                except ValueError as e:
+                    raise DownloadError(f"Archive .zip không an toàn: {e}") from e
+
         approved = _approved_on_fetch(package)
         pv = PackageVersion(
             package=package,

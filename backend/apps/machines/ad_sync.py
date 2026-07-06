@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass
 
 from django.conf import settings
-from django.db.models import ProtectedError
+from django.db.models import ProtectedError, Q
 from django.utils import timezone
 
 from .models import Machine
@@ -211,8 +211,21 @@ def sync_computers_from_ad(
 
     # Xóa máy không còn trong kết quả AD (khi đổi OU scope).
     if purge and synced_hostnames:
+        candidates = Machine.objects.exclude(hostname__in=synced_hostnames)
+        # search_base có thể hẹp hơn toàn domain (VD chỉ 1 OU con) — nếu vậy, giới hạn
+        # tập xoá theo đúng scope này (dùng ad_ou, cùng định dạng "OU=...,OU=..." với
+        # _extract_ou), tránh xoá nhầm máy thuộc OU khác đã sync ở lần chạy trước.
+        # search_ou_chain rỗng nghĩa là search_base là gốc domain (không có OU=) →
+        # coi như sync toàn domain, giữ nguyên hành vi xoá không giới hạn như trước.
+        search_ou_chain = ",".join(
+            p.strip() for p in search_base.split(",") if p.strip().upper().startswith("OU=")
+        )
+        if search_ou_chain:
+            candidates = candidates.filter(
+                Q(ad_ou__iexact=search_ou_chain) | Q(ad_ou__iendswith="," + search_ou_chain)
+            )
         try:
-            deleted_count, _ = Machine.objects.exclude(hostname__in=synced_hostnames).delete()
+            deleted_count, _ = candidates.delete()
         except ProtectedError:
             deleted_count = 0
             logger.warning(

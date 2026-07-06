@@ -355,3 +355,26 @@ def test_update_deploy_endpoint(db, roles, monkeypatch):
     dep = Deployment.objects.get(id=r.json()["deployment_id"])
     assert dep.package_version_id == pkg.latest_version.id
     assert list(dep.target_machines.values_list("id", flat=True)) == [m.id]
+
+
+def test_update_deploy_endpoint_closes_deployment_when_no_jobs(db, roles, monkeypatch):
+    # launch_deployment trả 0 job (VD máy bị disable/loại khỏi targeting giữa lúc
+    # outdated_machine_ids() và resolve_targets() chạy) — deployment tạo mặc định DRAFT
+    # không được để kẹt vĩnh viễn, phải đóng lại COMPLETED như trigger()/beat task.
+    from apps.deployments import orchestrator
+    from apps.deployments.models import Deployment, DeploymentStatus
+
+    monkeypatch.setattr(orchestrator, "launch_deployment", lambda dep: 0)
+
+    pkg = _pkg_with_latest("NoJobs", "1.0", inventory_name="NoJobs")
+    m = Machine.objects.create(hostname="D2")
+    InstalledSoftware.objects.create(machine=m, name="NoJobs", version="0.9")
+    cred = DeployCredential.objects.create(name="svc2", username="svc_deploy2")
+
+    op = _client("op3", group="operator")
+    r = op.post(f"/api/updates/{pkg.id}/deploy/", {"credential": cred.id},
+                content_type="application/json")
+    assert r.status_code == 202
+    dep = Deployment.objects.get(id=r.json()["deployment_id"])
+    assert dep.status == DeploymentStatus.COMPLETED
+    assert dep.finished_at is not None

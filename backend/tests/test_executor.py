@@ -113,6 +113,65 @@ def test_copy_payload_extract_zip_generates_tar_and_dir_token(tmp_path):
     assert bat.index("tar -xf") < bat.index(expected_command)
 
 
+class _FakeEntry:
+    def __init__(self, name, is_dir=False):
+        self._name = name
+        self._is_dir = is_dir
+
+    def get_longname(self):
+        return self._name
+
+    def is_directory(self):
+        return self._is_dir
+
+
+class _FakeCleanupConn:
+    """SMBConnection giả mô phỏng cây thư mục lồng nhau (VD "extracted" của archive
+    .zip) để test xóa đệ quy."""
+
+    def __init__(self, tree):
+        self.tree = tree  # path (không có "\*") -> list[_FakeEntry]
+        self.deleted_files = []
+        self.deleted_dirs = []
+
+    def listPath(self, share, pattern):
+        path = pattern[:-2]  # bỏ hậu tố "\*"
+        return self.tree.get(path, [])
+
+    def deleteFile(self, share, path):
+        self.deleted_files.append(path)
+
+    def deleteDirectory(self, share, path):
+        self.deleted_dirs.append(path)
+
+
+def test_delete_exec_dir_recurses_into_nested_extracted_subdir():
+    # Trước fix: chỉ xóa file ở cấp trên cùng — thư mục con "extracted" (giải nén .zip)
+    # bị bỏ lại vĩnh viễn trên máy đích vì deleteFile/deleteDirectory fail âm thầm.
+    ex = _ex()
+    exec_dir = ex._share_path("jobR")
+    extracted = exec_dir + "\\extracted"
+    nested = extracted + "\\sub"
+
+    tree = {
+        exec_dir: [_FakeEntry("run.bat"), _FakeEntry("extracted", is_dir=True)],
+        extracted: [_FakeEntry("readme.txt"), _FakeEntry("sub", is_dir=True)],
+        nested: [_FakeEntry("deep.txt")],
+    }
+    ex._conn = _FakeCleanupConn(tree)
+
+    ex._delete_exec_dir("jobR")
+
+    conn = ex._conn
+    assert exec_dir + "\\run.bat" in conn.deleted_files
+    assert extracted + "\\readme.txt" in conn.deleted_files
+    assert nested + "\\deep.txt" in conn.deleted_files
+    # Thư mục con phải được xóa TRƯỚC thư mục cha (nested < extracted < exec_dir).
+    assert conn.deleted_dirs.index(nested) < conn.deleted_dirs.index(extracted)
+    assert conn.deleted_dirs.index(extracted) < conn.deleted_dirs.index(exec_dir)
+    assert f"{ex.target_dir}\\jobR" in conn.deleted_dirs
+
+
 def test_copy_payload_no_extract_keeps_single_file_redirect(tmp_path):
     ex = _ex()
     ex._conn = _FakeConn()

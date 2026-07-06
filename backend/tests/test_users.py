@@ -2,6 +2,7 @@ import pytest
 from django.contrib.auth.models import Group, User
 from django.test import Client
 
+from apps.audit.models import AuditLog
 from apps.core.permissions import ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER, user_roles
 
 
@@ -140,3 +141,25 @@ def test_can_delete_admin_when_another_exists(admin_client):
     )
     uid = r.json()["id"]
     assert admin_client.delete(f"/api/users/{uid}/").status_code == 204
+
+
+# --- Audit log (đổi role/xoá user trước đây không để lại dấu vết gì) ---
+
+def test_role_change_is_audit_logged(admin_client):
+    u = User.objects.create_user("dave", password="Str0ngPass9")
+    u.groups.add(Group.objects.get(name=ROLE_VIEWER))
+    admin_client.patch(
+        f"/api/users/{u.id}/", {"role": "operator"}, content_type="application/json"
+    )
+    log = AuditLog.objects.filter(action=AuditLog.Action.USER_UPDATE, target_id=str(u.pk)).first()
+    assert log is not None
+    assert log.detail["role"] == "operator"
+
+
+def test_user_delete_is_audit_logged(admin_client):
+    u = User.objects.create_user("erin", password="Str0ngPass9")
+    u.groups.add(Group.objects.get(name=ROLE_VIEWER))
+    admin_client.delete(f"/api/users/{u.id}/")
+    log = AuditLog.objects.filter(action=AuditLog.Action.USER_DELETE, target_id=str(u.pk)).first()
+    assert log is not None
+    assert log.detail["username"] == "erin"

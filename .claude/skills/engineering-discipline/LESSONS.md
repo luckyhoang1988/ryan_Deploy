@@ -14,6 +14,99 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-06 — Sửa 10 finding High từ báo cáo review; 3 gotcha môi trường phải verify trước khi code
+**Bối cảnh:** Sau khi vá xong 3 Critical, tiếp tục 10 finding High (core/credentials/machines/
+deployments/jobs/executor/audit/frontend) từ cùng báo cáo review. Trước khi viết fix, verify
+3 điểm kỹ thuật thay vì đoán — cả 3 đều đổi thiết kế fix ban đầu.
+**Bài học:**
+1. **`select_for_update()` trên SQLite không raise lỗi — âm thầm bỏ qua khoá** (test dùng
+   `ryandeploy.settings.test`, sqlite; `connection.features.has_select_for_update == False`
+   nhưng gọi vẫn chạy, chỉ là không khoá thật). Xác nhận bằng cách chạy thật trong Django
+   shell trước khi dùng cho fix race-condition ở `UserViewSet` (khoá admin cuối cùng,
+   `apps/core/views.py::_locked_admin_capable`). Production dùng PostgreSQL (`base.py`,
+   `has_select_for_update == True`) nên khoá có hiệu lực thật ở đó — nhưng nghĩa là test
+   trên SQLite KHÔNG thể chứng minh race thật sự bị chặn, chỉ xác nhận code path không lỗi.
+   Codebase đã có tiền lệ dùng pattern này thành công (`deployments/tasks.py::trigger_due_schedules`,
+   dòng ~139) — nên tái dùng, không phát minh cơ chế lock khác.
+2. **pytest-django tự ép `DEBUG=False` cho MỌI test, bất kể `DEBUG` thật trong settings
+   module đang dùng** (ở đây `ryandeploy.settings.test` đặt `DEBUG=True` nhưng pytest-django
+   override lại). Fix ban đầu định gate 1 fallback (vault dev-key) bằng `settings.DEBUG` —
+   sai hoàn toàn vì test sẽ luôn thấy `DEBUG=False` dù chạy trong môi trường "dev-like".
+   Phát hiện qua chạy test thật (fail ngay ở lần chạy đầu), không phải đọc doc trước.
+   **Áp dụng:** không bao giờ dùng `settings.DEBUG` làm tín hiệu môi trường trong logic mà
+   test cần verify hành vi — dùng cờ config riêng, tường minh (VD `RYANDEPLOY["VAULT_DEV_FALLBACK"]`,
+   set explicit trong từng settings module) thay vì suy diễn từ `DEBUG`.
+3. **impacket không cài trong venv dự án** (chỉ pin trong `requirements.txt`, chưa `pip
+   install`), nên không thể tự kiểm API (`is_directory()` trên entry trả về từ
+   `SMBConnection.listPath()`) bằng cách import trực tiếp. `pip install`/`pip download`
+   impacket qua mạng liên tục thất bại — tải xong `.tar.gz` (đúng size) nhưng file biến mất
+   hoặc lỗi `OSError: Invalid argument` khi mở lại ngay sau đó, nhiều khả năng do AV/Defender
+   quarantine âm thầm file nén có tên "impacket" (công cụ pentest hay bị heuristic chặn).
+   **Áp dụng:** khi cần đọc source 1 thư viện pin nhưng không cài được do bị quarantine dạng
+   archive, fetch trực tiếp TỪNG FILE `.py` qua raw.githubusercontent.com (tag đúng version,
+   VD `impacket_0_12_0`) — file text đơn lẻ không bị flag như archive. Xác nhận được
+   `SharedFile.is_directory()` (snake_case, trong `impacket/smb.py`) bằng cách này.
+4. **Đổi `choices` của 1 `CharField` (thêm action mới vào `AuditLog.Action`) vẫn cần
+   migration** dù không đổi kiểu cột/schema DB thật — Django track `choices` như 1 phần
+   field state cho lịch sử migration. `makemigrations --check --dry-run` bắt được thiếu sót
+   này; đừng bỏ qua bước này chỉ vì "chỉ thêm text choice, chắc không cần migration".
+
+---
+
+## 2026-07-05 — Vá 2/3 finding Critical audit ngoài; finding thứ 3 (command injection install_command) không xác nhận được
+**Bối cảnh:** Sau /clear, tiếp tục xử lý báo cáo review 35 finding (3 Critical) từ phiên
+trước. Đọc lại code hiện tại (đã có nhiều lớp hardening từ các phiên trước đó) để verify
+từng finding trước khi sửa, theo đúng bài học 2026-07-05 "Verify lại 1 review ngoài".
+**Bài học:**
+1. **`credential.get_password()` (giải mã Fernet) không được bọc try/except tại
+   `apps/jobs/tasks.py::_run_job`** — job đã claim `RUNNING` (update() atomic ở đầu hàm)
+   trước khi gọi decrypt; nếu VAULT_KEY bị xoay hoặc ciphertext hỏng, `vault.decrypt()`
+   ném `InvalidToken`/`ValueError` thoát thẳng khỏi Celery task, không còn nơi nào ghi
+   `FAILED` → job kẹt `RUNNING` vĩnh viễn, phải sửa DB thủ công. Fix theo đúng pattern đã
+   có sẵn cho lỗi đọc file installer (integrity check OSError, cùng hàm): bọc riêng lệnh
+   decrypt, ghi `FAILED` qua `_write_job_result` rồi return, không audit JOB_FINISH (nhất
+   quán với 2 nhánh integrity-fail hiện có, chúng cũng không audit).
+2. **Archive `.zip` (InstallerType.ZIP) được `PushExecutor._copy_payload` giải nén bằng
+   `tar -xf` NGAY TRÊN MÁY ĐÍCH dưới quyền SYSTEM, nhưng KHÔNG có bước validate nào trước
+   đó** — cả 2 điểm tạo `PackageVersion` (upload thủ công qua `PackageVersionSerializer`,
+   VÀ tải từ URL qua `downloader.fetch()` — đường này hoàn toàn KHÔNG đi qua serializer)
+   đều thiếu kiểm tra zip-slip (entry `../` hoặc absolute path ghi đè file ngoài thư mục
+   giải nén) và zip-bomb (tỉ lệ nén bất thường / tổng dung lượng giải nén làm đầy đĩa toàn
+   fleet). Thêm `repository.validate_zip_archive()` dùng `zipfile.ZipFile(...).infolist()`
+   (chỉ đọc central directory, KHÔNG giải nén thật nên an toàn để kiểm tra) — check
+   `os.path.normpath()` không tuyệt đối/không bắt đầu bằng `..`/không có `:` (ổ đĩa
+   Windows), tỉ lệ `file_size/compress_size` mỗi entry, và tổng `file_size` so với trần
+   (mặc định `MAX_INSTALLER_MB * 10`). Gọi hàm này ở CẢ HAI điểm tạo (serializer
+   `validate()` object-level — cần cả `installer_file` lẫn `installer_type` nên không đặt
+   trong `validate_installer_file` field-level; và `downloader.fetch()` trước khi lưu
+   file) — chỉ vá 1 điểm là không đủ vì đây là 2 đường tạo `PackageVersion` độc lập nhau.
+3. **Finding thứ 3 ("command injection" ở `push_executor.py:301-306`, nơi
+   `install_command`/`uninstall_command` ghép thẳng vào `.bat` không escape) KHÔNG xác
+   nhận được là lỗ hổng phân biệt được với thiết kế có chủ đích** sau khi verify: (a)
+   field này chỉ set được qua `PackageVersionSerializer`, và CẢ `PackageViewSet` lẫn
+   `PackageVersionViewSet` đều `permission_classes = [IsAdmin]` — không có endpoint nào
+   khác chạm được field; (b) tên file installer (kể cả suy từ `Content-Disposition` khi
+   tải qua URL ở `downloader._filename_from`, vốn do SERVER NGOÀI kiểm soát) đều đi qua
+   `FileSystemStorage.get_valid_name()` (Django) trước khi lưu — đã tự verify bằng
+   `get_valid_filename('a" & del /q C:\\* & "b.exe')` → `'a__del_q_C__b.exe'`, tức dấu
+   `"`/`&`/khoảng trắng đều bị strip, không có đường tiêm qua filename. Vậy
+   `install_command` là 1 chuỗi lệnh HOÀN TOÀN do admin đã-qua-RBAC tự viết — đây chính là
+   tính năng cốt lõi của công cụ (giống PDQ Deploy: admin viết silent-install command chạy
+   SYSTEM trên máy đích theo thiết kế), không phải input từ nguồn kém tin cậy hơn để
+   "tiêm". Đã hỏi user, chọn KHÔNG sửa (không có gì để "escape" một cách có ý nghĩa khi
+   toàn bộ chuỗi CHÍNH LÀ lệnh cần chạy) — ghi chú lại thay vì ép fix cho có.
+**Áp dụng:** Khi 1 report review liệt kê "command injection" cho 1 field text tự do mà
+sản phẩm CỐ Ý cho phép admin viết lệnh tuỳ ý (deployment tool kiểu PDQ) — luôn kiểm tra
+2 việc trước khi tin: (a) RBAC nào thực sự gate được field đó (đọc permission_classes của
+ViewSet, không đoán), (b) có đường nào khác (vd tải từ URL ngoài, tên file server khác trả
+về) đưa dữ liệu KÉM TIN CẬY HƠN vào cùng field không — nếu cả 2 đều "chỉ admin, không có
+đường phụ" thì đây là ranh giới tin cậy có chủ đích, không phải bug. Archive `.zip` giải
+nén trên máy đích luôn cần validate zip-slip + zip-bomb ở MỌI điểm tạo bản ghi (không chỉ
+đường upload chính qua serializer — các đường "phụ" như tải-từ-URL dễ bị quên vì không đi
+qua cùng 1 lớp validation).
+
+---
+
 ## 2026-07-05 — "Deploy from Library": Wizard tách component dùng chung, vite proxy cần đúng port 8000
 **Bối cảnh:** Thêm nút "Deploy" 1 chạm từ trang Packages (mở sẵn `DeploymentWizard` với package
 version pre-fill), tách `Wizard` cục bộ của `Deployments.jsx` thành `components/DeploymentWizard.jsx`

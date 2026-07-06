@@ -28,6 +28,8 @@ class AuditLog(models.Model):
         JOB_FINISH = "job_finish", "Kết thúc job"
         MACHINE_SYNC = "machine_sync", "Đồng bộ máy từ AD"
         CATALOG_SEED = "catalog_seed", "Nạp Package Library mẫu"
+        USER_UPDATE = "user_update", "Sửa user"
+        USER_DELETE = "user_delete", "Xóa user"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
