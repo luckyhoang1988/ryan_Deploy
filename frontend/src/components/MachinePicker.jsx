@@ -33,8 +33,11 @@ export default function MachinePicker({ value, onChange, maxHeight = 300 }) {
   // Chỉ chọn hết máy CÒN BẬT — máy enabled=false bị targeting bỏ qua lúc chạy nên
   // đưa vào "chọn hết" sẽ tạo ảo tưởng đã chọn nhưng thực chất không chạy.
   const selectableShown = shown.filter((m) => m.enabled);
+  const onlineShown = selectableShown.filter((m) => m.is_online);
   const selectAllShown = () =>
     onChange([...new Set([...value, ...selectableShown.map((m) => m.id)])]);
+  const selectOnlineShown = () =>
+    onChange([...new Set([...value, ...onlineShown.map((m) => m.id)])]);
   const clearAll = () => onChange([]);
   const addGroup = (g) => onChange([...new Set([...value, ...g.machines])]);
 
@@ -56,6 +59,9 @@ export default function MachinePicker({ value, onChange, maxHeight = 300 }) {
         )}
         <button type="button" className="btn ghost" style={{ padding: "6px 10px" }} onClick={selectAllShown}>
           Chọn hết ({selectableShown.length})
+        </button>
+        <button type="button" className="btn ghost" style={{ padding: "6px 10px" }} onClick={selectOnlineShown} disabled={onlineShown.length === 0}>
+          🟢 Chọn máy online ({onlineShown.length})
         </button>
         {value.length > 0 && (
           <button type="button" className="btn ghost" style={{ padding: "6px 10px" }} onClick={clearAll}>
