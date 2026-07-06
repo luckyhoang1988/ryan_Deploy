@@ -1,11 +1,15 @@
+import csv
+import io
 import logging
 
 from django.db import transaction
 from django.db.models import Count, Q
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
@@ -18,6 +22,10 @@ from .orchestrator import cancel_deployment, launch_deployment
 from .serializers import DeploymentScheduleSerializer, DeploymentSerializer
 
 logger = logging.getLogger("apps.deployments")
+
+
+class DeploymentPagination(PageNumberPagination):
+    page_size = 30
 
 
 class DeploymentViewSet(viewsets.ModelViewSet):
@@ -45,14 +53,53 @@ class DeploymentViewSet(viewsets.ModelViewSet):
         .order_by("-created_at")
     )
     serializer_class = DeploymentSerializer
+    pagination_class = DeploymentPagination
 
-    def get_queryset(self):
-        # ?status=running — dùng cho panel "Đang chạy" toàn cục (Layout.jsx).
-        qs = super().get_queryset()
+    def _apply_filters(self, qs):
+        """Áp dụng bộ lọc chung cho list và export.
+
+        ?status= dùng cho cả panel "Đang chạy" toàn cục (Layout.jsx) và bộ lọc
+        trên trang Deployments.
+        """
         status_param = self.request.query_params.get("status")
         if status_param:
             qs = qs.filter(status=status_param)
         return qs
+
+    def get_queryset(self):
+        return self._apply_filters(super().get_queryset())
+
+    @action(detail=False, methods=["get"])
+    def export(self, request):
+        """Xuất danh sách deployment ra file CSV (Excel-compatible, UTF-8 BOM)."""
+        qs = self.get_queryset()
+        buf = io.StringIO()
+        buf.write("﻿")
+        writer = csv.writer(buf)
+        writer.writerow([
+            "Tên", "Package", "Version", "Trạng thái",
+            "Thành công", "Thất bại", "Đang chờ", "Tổng máy",
+            "Ngày tạo", "Ngày hoàn thành",
+        ])
+        # chunk_size bắt buộc vì queryset có prefetch_related (target_machines).
+        for d in qs.iterator(chunk_size=200):
+            # package_version để trống với action reboot/shutdown/inventory (xem model).
+            pv = d.package_version
+            writer.writerow([
+                d.name,
+                pv.package.name if pv else "",
+                pv.version if pv else "",
+                d.get_status_display(),
+                d.n_success,
+                d.n_failed,
+                d.n_pending,
+                d.n_total,
+                d.created_at.strftime("%Y-%m-%d %H:%M") if d.created_at else "",
+                d.finished_at.strftime("%Y-%m-%d %H:%M") if d.finished_at else "",
+            ])
+        resp = HttpResponse(buf.getvalue(), content_type="text/csv; charset=utf-8")
+        resp["Content-Disposition"] = 'attachment; filename="deployments.csv"'
+        return resp
 
     def get_throttles(self):
         # Chống spam các action ghi/tốn kém (trigger/cancel có thể đẩy hàng trăm máy).

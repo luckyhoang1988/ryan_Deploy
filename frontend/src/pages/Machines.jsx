@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { api, waitForTask } from "../api";
 import { useAuth } from "../auth";
+import Pagination from "../components/Pagination";
 
 const PAGE_SIZE = 25;
 
@@ -22,8 +23,6 @@ export default function Machines() {
 
   // Stats
   const [stats, setStats] = useState({ total: 0, online: 0, offline: 0 });
-
-  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
 
   const buildQuery = useCallback((p) => {
     const params = new URLSearchParams();
@@ -65,10 +64,6 @@ export default function Machines() {
   useEffect(() => {
     setPage(1);
   }, [search, filterStatus, filterOU]);
-
-  const goToPage = (p) => {
-    if (p >= 1 && p <= totalPages) setPage(p);
-  };
 
   const syncAd = async (purge = false) => {
     setBusy("ad"); setErr(""); setMsg("");
@@ -119,23 +114,6 @@ export default function Machines() {
     if (filterOU.trim()) params.set("ad_ou", filterOU.trim());
     const q = params.toString();
     window.open(`/api/machines/export/${q ? "?" + q : ""}`, "_blank");
-  };
-
-  // Tính dãy số trang hiển thị (tối đa 7 nút, có dấu … khi quá nhiều)
-  const pageNumbers = () => {
-    const pages = [];
-    if (totalPages <= 7) {
-      for (let i = 1; i <= totalPages; i++) pages.push(i);
-    } else {
-      pages.push(1);
-      if (page > 3) pages.push("…l");
-      const start = Math.max(2, page - 1);
-      const end = Math.min(totalPages - 1, page + 1);
-      for (let i = start; i <= end; i++) pages.push(i);
-      if (page < totalPages - 2) pages.push("…r");
-      pages.push(totalPages);
-    }
-    return pages;
   };
 
   return (
@@ -242,45 +220,7 @@ export default function Machines() {
         </tbody>
       </table>
 
-      {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="pagination">
-          <span className="pagination-info">
-            Hiển thị {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, totalCount)} / {totalCount} máy
-          </span>
-          <div className="pagination-controls">
-            <button
-              className="pagination-btn"
-              onClick={() => goToPage(page - 1)}
-              disabled={page <= 1}
-              title="Trang trước"
-            >
-              ‹
-            </button>
-            {pageNumbers().map((p) =>
-              typeof p === "string" ? (
-                <span key={p} className="pagination-ellipsis">…</span>
-              ) : (
-                <button
-                  key={p}
-                  className={`pagination-btn${p === page ? " active" : ""}`}
-                  onClick={() => goToPage(p)}
-                >
-                  {p}
-                </button>
-              )
-            )}
-            <button
-              className="pagination-btn"
-              onClick={() => goToPage(page + 1)}
-              disabled={page >= totalPages}
-              title="Trang sau"
-            >
-              ›
-            </button>
-          </div>
-        </div>
-      )}
+      <Pagination page={page} totalCount={totalCount} pageSize={PAGE_SIZE} onPageChange={setPage} itemLabel="máy" />
 
       {showConfig && (
         <ADConfigModal

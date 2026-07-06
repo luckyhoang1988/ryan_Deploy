@@ -1,8 +1,13 @@
+import csv
+import io
+
 from django.db.models import Prefetch, ProtectedError
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import ValidationError
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -22,6 +27,10 @@ from .serializers import (
 )
 
 
+class PackagePagination(PageNumberPagination):
+    page_size = 30
+
+
 class PackageViewSet(viewsets.ModelViewSet):
     # prefetch_related("versions") cho field lồng `versions` trong serializer; Prefetch
     # riêng (to_attr) cho `latest_version` để tránh mỗi package tự query lại (N+1 khi list).
@@ -35,8 +44,41 @@ class PackageViewSet(viewsets.ModelViewSet):
         ),
     )
     serializer_class = PackageSerializer
+    pagination_class = PackagePagination
     # Tier-0: chỉ admin được tạo/sửa/xóa package (đọc vẫn cho mọi user auth).
     permission_classes = [IsAdmin]
+
+    def _apply_filters(self, qs):
+        """Áp dụng bộ lọc chung cho list và export — khớp cây thư mục trên frontend."""
+        folder_param = self.request.query_params.get("folder")
+        if folder_param:
+            qs = qs.filter(folder_id=folder_param)
+        return qs
+
+    def get_queryset(self):
+        return self._apply_filters(super().get_queryset())
+
+    @action(detail=False, methods=["get"])
+    def export(self, request):
+        """Xuất danh sách package ra file CSV (Excel-compatible, UTF-8 BOM)."""
+        qs = self.get_queryset()
+        buf = io.StringIO()
+        buf.write("﻿")
+        writer = csv.writer(buf)
+        writer.writerow(["Tên", "Vendor", "Số version", "License đã dùng", "Tổng license", "Trạng thái"])
+        # chunk_size bắt buộc vì queryset có prefetch_related (versions).
+        for p in qs.iterator(chunk_size=200):
+            writer.writerow([
+                p.name,
+                p.vendor or "",
+                p.versions.count(),
+                p.used_licenses,
+                p.total_licenses,
+                "Sẵn sàng" if p.latest_version else "Chưa có installer",
+            ])
+        resp = HttpResponse(buf.getvalue(), content_type="text/csv; charset=utf-8")
+        resp["Content-Disposition"] = 'attachment; filename="packages.csv"'
+        return resp
 
     def perform_update(self, serializer):
         package = serializer.save()

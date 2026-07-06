@@ -1,27 +1,69 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, listOf } from "../api";
+import { api } from "../api";
 import { StatusBadge } from "../components/Layout";
 import DeploymentWizard from "../components/DeploymentWizard";
+import Pagination from "../components/Pagination";
 import { useAuth } from "../auth";
 import { subscribe } from "../ws";
+
+const PAGE_SIZE = 30;
+
+// Nhãn tiếng Việt cho DeploymentStatus, khớp STATUS_META trong components/Layout.jsx.
+const DEPLOYMENT_STATUS_OPTIONS = [
+  ["draft", "Nháp"],
+  ["scheduled", "Đã lên lịch"],
+  ["running", "Đang chạy"],
+  ["completed", "Hoàn thành"],
+  ["completed_errors", "Hoàn thành (có lỗi)"],
+  ["failed", "Thất bại"],
+  ["cancelled", "Đã hủy"],
+];
 
 export default function Deployments() {
   const { hasRole } = useAuth();
   const canWrite = hasRole("operator", "admin");
   const isAdmin = hasRole("admin");
   const [deployments, setDeployments] = useState([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [page, setPage] = useState(1);
+  const [filterStatus, setFilterStatus] = useState("");
   const [showWizard, setShowWizard] = useState(false);
   const [editDep, setEditDep] = useState(null);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
 
-  const load = () =>
-    api.get("/deployments/").then((d) => setDeployments(listOf(d))).catch((e) => setErr(e.message));
+  const buildQuery = useCallback((p) => {
+    const params = new URLSearchParams();
+    params.set("page", p);
+    if (filterStatus) params.set("status", filterStatus);
+    return params.toString();
+  }, [filterStatus]);
+
+  const load = useCallback((p = page) => {
+    api.get(`/deployments/?${buildQuery(p)}`)
+      .then((d) => {
+        setDeployments(d.results ?? []);
+        setTotalCount(d.count ?? 0);
+      })
+      .catch((e) => setErr(e.message));
+  }, [buildQuery, page]);
 
   useEffect(() => {
-    load();
-  }, []);
+    load(page);
+  }, [page, buildQuery]);
+
+  // Khi đổi filter trạng thái → reset về trang 1.
+  useEffect(() => {
+    setPage(1);
+  }, [filterStatus]);
+
+  const exportCSV = () => {
+    const params = new URLSearchParams();
+    if (filterStatus) params.set("status", filterStatus);
+    const q = params.toString();
+    window.open(`/api/deployments/export/${q ? "?" + q : ""}`, "_blank");
+  };
 
   // WebSocket real-time: patch đúng dòng theo id thay vì phải load lại cả trang.
   useEffect(() => {
@@ -53,6 +95,25 @@ export default function Deployments() {
       </div>
       {msg && <p className="muted">{msg}</p>}
       {err && <p className="error">{err}</p>}
+
+      <div className="filter-bar">
+        <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} style={{ maxWidth: 200 }}>
+          <option value="">Tất cả trạng thái</option>
+          {DEPLOYMENT_STATUS_OPTIONS.map(([value, label]) => (
+            <option key={value} value={value}>{label}</option>
+          ))}
+        </select>
+        {filterStatus && (
+          <button className="btn ghost" style={{ padding: "6px 12px" }} onClick={() => setFilterStatus("")}>
+            ✕ Xóa lọc
+          </button>
+        )}
+        <div style={{ flex: 1 }} />
+        <button className="btn ghost" onClick={exportCSV} title="Xuất danh sách deployment ra Excel (CSV)">
+          📥 Xuất Excel
+        </button>
+      </div>
+
       <table>
         <thead>
           <tr><th>Tên</th><th>Package</th><th>Trạng thái</th><th>Tiến độ</th><th></th></tr>
@@ -80,6 +141,9 @@ export default function Deployments() {
           {deployments.length === 0 && <tr><td colSpan="5" className="muted">Chưa có deployment.</td></tr>}
         </tbody>
       </table>
+
+      <Pagination page={page} totalCount={totalCount} pageSize={PAGE_SIZE} onPageChange={setPage} itemLabel="deployment" />
+
       {showWizard && (
         <DeploymentWizard
           isAdmin={isAdmin}

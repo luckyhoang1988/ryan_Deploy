@@ -1,8 +1,11 @@
-import { Fragment, useEffect, useState } from "react";
-import { api, listOf, fetchAll } from "../api";
+import { Fragment, useCallback, useEffect, useState } from "react";
+import { api, fetchAll, listOf } from "../api";
 import { useAuth } from "../auth";
 import Icon from "../components/Icon";
 import DeploymentWizard from "../components/DeploymentWizard";
+import Pagination from "../components/Pagination";
+
+const PAGE_SIZE = 30;
 
 export default function Packages() {
   const { hasRole } = useAuth();
@@ -11,6 +14,11 @@ export default function Packages() {
   // tách khỏi isAdmin vì thao tác CRUD package (upload/sửa/xóa) vẫn chỉ admin.
   const canDeploy = hasRole("operator", "admin");
   const [packages, setPackages] = useState([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [page, setPage] = useState(1);
+  // Danh sách package KHÔNG phân trang — dùng cho <select> chọn package trong
+  // UploadModal/FetchModal, cần thấy đủ mọi package bất kể đang xem trang/thư mục nào.
+  const [allPackages, setAllPackages] = useState([]);
   const [folders, setFolders] = useState([]);
   const [selectedFolder, setSelectedFolder] = useState(null); // null = "Tất cả package"
   const [expandedFolders, setExpandedFolders] = useState(new Set());
@@ -25,15 +33,46 @@ export default function Packages() {
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
 
-  const load = () =>
-    api.get("/packages/").then((d) => setPackages(listOf(d))).catch((e) => setErr(e.message));
+  const buildQuery = useCallback((p) => {
+    const params = new URLSearchParams();
+    params.set("page", p);
+    if (selectedFolder !== null) params.set("folder", selectedFolder);
+    return params.toString();
+  }, [selectedFolder]);
+
+  const load = useCallback((p = page) => {
+    api.get(`/packages/?${buildQuery(p)}`)
+      .then((d) => {
+        setPackages(d.results ?? []);
+        setTotalCount(d.count ?? 0);
+      })
+      .catch((e) => setErr(e.message));
+  }, [buildQuery, page]);
   const loadFolders = () =>
     fetchAll("/package-folders/").then(setFolders).catch((e) => setErr(e.message));
+  const loadAllPackages = () =>
+    fetchAll("/packages/").then(setAllPackages).catch((e) => setErr(e.message));
 
   useEffect(() => {
-    load();
+    load(page);
+  }, [page, buildQuery]);
+
+  useEffect(() => {
     loadFolders();
+    loadAllPackages();
   }, []);
+
+  // Khi đổi thư mục đang chọn → reset về trang 1.
+  useEffect(() => {
+    setPage(1);
+  }, [selectedFolder]);
+
+  const exportCSV = () => {
+    const params = new URLSearchParams();
+    if (selectedFolder !== null) params.set("folder", selectedFolder);
+    const q = params.toString();
+    window.open(`/api/packages/export/${q ? "?" + q : ""}`, "_blank");
+  };
 
   const childrenOf = (parentId) => folders.filter((f) => (f.parent ?? null) === parentId);
   const toggleFolder = (id) =>
@@ -54,10 +93,6 @@ export default function Packages() {
     } catch (e) { setErr(e.message); }
   };
 
-  const shownPackages = selectedFolder === null
-    ? packages
-    : packages.filter((p) => p.folder === selectedFolder);
-
   const approveVersion = async (v) => {
     setErr(""); setMsg("");
     try {
@@ -73,6 +108,7 @@ export default function Packages() {
       const r = await api.post("/packages/seed_catalog/", {});
       setMsg(`Đã nạp Package Library mẫu: tạo mới ${r.created}, bỏ qua ${r.skipped} (đã có).`);
       load();
+      loadAllPackages();
     } catch (e) { setErr(e.message); }
   };
 
@@ -83,6 +119,7 @@ export default function Packages() {
       await api.del(`/packages/${p.id}/`);
       setMsg(`Đã xóa package "${p.name}".`);
       load();
+      loadAllPackages();
     } catch (e) { setErr(e.message); }
   };
 
@@ -112,6 +149,9 @@ export default function Packages() {
             </button>
           )}
           {isAdmin && <button className="btn ghost" onClick={() => setShowFetch(true)}>↓ Tải từ URL</button>}
+          <button className="btn ghost" onClick={exportCSV} title="Xuất danh sách package ra Excel (CSV)">
+            📥 Xuất Excel
+          </button>
           {isAdmin && <button className="btn" onClick={() => setShowUpload(true)}>+ Upload version</button>}
         </div>
       </div>
@@ -159,7 +199,7 @@ export default function Packages() {
               </tr>
             </thead>
             <tbody>
-              {shownPackages.map((p) => {
+              {packages.map((p) => {
                 const isOpen = expanded === p.id;
                 // Bản duyệt mới nhất — versions đã sort -created_at từ backend nên phần tử
                 // đầu khớp approved là latest_version.
@@ -220,24 +260,25 @@ export default function Packages() {
                   </Fragment>
                 );
               })}
-              {shownPackages.length === 0 && (
+              {packages.length === 0 && (
                 <tr><td colSpan={5 + (canDeploy ? 1 : 0) + (isAdmin ? 1 : 0)} className="muted">Chưa có package.</td></tr>
               )}
             </tbody>
           </table>
+          <Pagination page={page} totalCount={totalCount} pageSize={PAGE_SIZE} onPageChange={setPage} itemLabel="package" />
           {showHistory && isAdmin && <DownloadHistory />}
         </div>
       </div>
       {showUpload && (
         <UploadModal
-          packages={packages}
+          packages={allPackages}
           onClose={() => setShowUpload(false)}
-          onDone={() => { setShowUpload(false); setMsg("Đã upload version."); load(); }}
+          onDone={() => { setShowUpload(false); setMsg("Đã upload version."); load(); loadAllPackages(); }}
         />
       )}
       {showFetch && (
         <FetchModal
-          packages={packages}
+          packages={allPackages}
           onClose={() => setShowFetch(false)}
           onDone={() => { setShowFetch(false); setMsg("Đang tải trong nền — làm mới sau ít phút để thấy version mới."); }}
         />
@@ -255,7 +296,7 @@ export default function Packages() {
           pkg={editPkg}
           folders={folders}
           onClose={() => setEditPkg(null)}
-          onDone={() => { setEditPkg(null); setMsg("Đã lưu package."); load(); }}
+          onDone={() => { setEditPkg(null); setMsg("Đã lưu package."); load(); loadAllPackages(); }}
         />
       )}
       {folderModal && (
