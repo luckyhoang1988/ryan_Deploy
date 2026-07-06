@@ -49,7 +49,7 @@ def check_all_online():
     if not machines:
         return {"checked": 0, "online": 0}
 
-    max_workers = settings.RYANDEPLOY.get("MACHINE_ONLINE_SCAN_WORKERS", 64)
+    max_workers = max(1, settings.RYANDEPLOY.get("MACHINE_ONLINE_SCAN_WORKERS", 64))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         results = list(pool.map(_refresh_and_close, machines))
 
