@@ -133,6 +133,7 @@ label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px
 .badge.failed { background: rgba(239,68,68,.15); color: var(--red); }
 .badge.running, .badge.queued, .badge.pending { background: rgba(245,158,11,.15); color: var(--amber); }
 .badge.reboot { background: rgba(59,130,246,.15); color: var(--blue); }
+.badge.info { background: rgba(59,130,246,.15); color: var(--blue); }
 .badge.warn { background: rgba(245,158,11,.18); color: var(--amber); }
 .badge.default { background: var(--panel2); color: var(--muted); }
 

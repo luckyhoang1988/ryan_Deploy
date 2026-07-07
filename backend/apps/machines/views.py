@@ -8,12 +8,19 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.agents.services import issue_token, revoke_token
+from apps.audit.models import AuditLog
 from apps.core.permissions import IsAdmin, IsViewerOrAbove
 from apps.core.task_registry import remember_task_owner
 
 from .ad_sync import test_ad_connection
 from .models import ADConfig, Machine, MachineGroup
-from .serializers import ADConfigSerializer, MachineGroupSerializer, MachineSerializer
+from .serializers import (
+    ADConfigSerializer,
+    MachineDetailSerializer,
+    MachineGroupSerializer,
+    MachineSerializer,
+)
 from .tasks import check_all_online, sync_from_ad
 
 
@@ -29,6 +36,12 @@ class MachineViewSet(viewsets.ModelViewSet):
         if self.action in ("check_online", "stats", "export"):
             return [IsViewerOrAbove()]
         return super().get_permissions()
+
+    def get_serializer_class(self):
+        # Chỉ detail (retrieve) trả kèm trạng thái token agent — tránh N+1 query khi list.
+        if self.action == "retrieve":
+            return MachineDetailSerializer
+        return super().get_serializer_class()
 
     def _apply_filters(self, qs):
         """Áp dụng bộ lọc chung cho list, stats, export."""
@@ -134,6 +147,62 @@ class MachineViewSet(viewsets.ModelViewSet):
             ])
         resp = HttpResponse(buf.getvalue(), content_type="text/csv; charset=utf-8")
         resp["Content-Disposition"] = 'attachment; filename="machines.csv"'
+        return resp
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAdmin])
+    def provision_agent_token(self, request, pk=None):
+        """Cấp (hoặc xoay) token agent cho máy — hiển thị token gốc đúng 1 lần, không lấy lại được."""
+        machine = self.get_object()
+        raw = issue_token(machine, request.user)
+        AuditLog.record(
+            AuditLog.Action.AGENT_TOKEN_ISSUE, user=request.user,
+            target=machine, machine_hostname=machine.hostname,
+        )
+        return Response({"token": raw}, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAdmin])
+    def revoke_agent_token(self, request, pk=None):
+        """Thu hồi token agent hiện tại của máy (nếu có)."""
+        machine = self.get_object()
+        revoked = revoke_token(machine)
+        if revoked:
+            AuditLog.record(
+                AuditLog.Action.AGENT_TOKEN_REVOKE, user=request.user,
+                target=machine, machine_hostname=machine.hostname,
+            )
+        return Response({"revoked": revoked})
+
+    @action(detail=False, methods=["post"], url_path="bulk-provision-agent-tokens", permission_classes=[IsAdmin])
+    def bulk_provision_agent_tokens(self, request):
+        """
+        Cấp token agent hàng loạt theo danh sách machine_ids hoặc filter ad_ou — dùng khi rollout
+        agent theo OU. Trả CSV hostname,token để đưa vào GPO startup script.
+        """
+        machine_ids = request.data.get("machine_ids")
+        ad_ou = (request.data.get("ad_ou") or "").strip()
+        qs = Machine.objects.filter(enabled=True)
+        if machine_ids:
+            qs = qs.filter(pk__in=machine_ids)
+        elif ad_ou:
+            qs = qs.filter(ad_ou__icontains=ad_ou)
+        else:
+            return Response(
+                {"detail": "Cần truyền machine_ids hoặc ad_ou."}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        machines = list(qs)
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["hostname", "token"])
+        for machine in machines:
+            raw = issue_token(machine, request.user)
+            writer.writerow([machine.hostname, raw])
+        AuditLog.record(
+            AuditLog.Action.AGENT_TOKEN_ISSUE, user=request.user,
+            count=len(machines), bulk=True,
+        )
+        resp = HttpResponse(buf.getvalue(), content_type="text/csv; charset=utf-8")
+        resp["Content-Disposition"] = 'attachment; filename="agent_tokens.csv"'
         return resp
 
 

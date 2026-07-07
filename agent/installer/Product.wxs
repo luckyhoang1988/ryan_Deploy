@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v3 source cho RyanDeploy Agent MSI — dùng để publish qua GPO Computer Software
+  Installation (Computer Configuration > Policies > Software Settings > Software Installation).
+  Assign (không phải Publish) để MSI tự cài lúc boot dưới SYSTEM, không cần port inbound.
+
+  Build: xem build.ps1 trong cùng thư mục (yêu cầu cài WiX Toolset v3.11+,
+  https://wixtoolset.org/releases/).
+
+  Version phải TĂNG mỗi lần build lại để GPO/Windows Installer nhận ra là upgrade
+  (UpgradeCode giữ cố định — không đổi giữa các phiên bản).
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="RyanDeploy Agent"
+           Language="1033"
+           Version="$(var.ProductVersion)"
+           Manufacturer="RyanDeploy"
+           UpgradeCode="A586D656-65D0-4653-9364-B70FFC1040E3">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Description="RyanDeploy Agent — nhận job triển khai qua HTTPS outbound"
+             Comments="Không yêu cầu port inbound trên máy đích." />
+
+    <MajorUpgrade DowngradeErrorMessage="Đã cài bản RyanDeploy Agent mới hơn. Gỡ bản mới trước khi cài bản cũ." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="RyanDeployAgent" />
+      </Directory>
+    </Directory>
+
+    <!--
+      ProgramData\RyanDeployAgent chứa agent.ini (rải bởi GPO Startup Script riêng, xem
+      gpo_startup_provision_token.ps1) và thư mục logs\ — agent tự tạo logs\ lúc chạy
+      (service.py::_configure_logging), ở đây chỉ đảm bảo thư mục gốc tồn tại sẵn từ lúc cài
+      để admin có thể đặt agent.ini thủ công trước khi service chạy lần đầu nếu cần.
+    -->
+    <DirectoryRef Id="TARGETDIR">
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="PROGRAMDATAFOLDER" Name="RyanDeployAgent" />
+      </Directory>
+    </DirectoryRef>
+
+    <Feature Id="MainFeature" Title="RyanDeploy Agent" Level="1">
+      <ComponentRef Id="AgentExeComponent" />
+      <ComponentRef Id="ProgramDataFolderComponent" />
+    </Feature>
+
+    <ComponentGroup Id="AgentComponents">
+      <Component Id="AgentExeComponent" Directory="INSTALLFOLDER" Guid="FE498277-34EF-4000-9BD5-5646A074B659">
+        <File Id="AgentExe"
+              Source="..\dist\RyanDeployAgent.exe"
+              KeyPath="yes" />
+
+        <!--
+          Đăng ký làm Windows Service — exe khi được SCM gọi KHÔNG có tham số sẽ tự
+          StartServiceCtrlDispatcher (xem ryandeploy_agent/service.py::main()), đúng chuẩn
+          pywin32 ServiceFramework nên không cần custom action nào để "install"/"start" service,
+          WiX ServiceInstall/ServiceControl xử lý toàn bộ qua Windows Installer chuẩn.
+        -->
+        <ServiceInstall Id="RyanDeployAgentServiceInstall"
+                         Name="RyanDeployAgent"
+                         DisplayName="RyanDeploy Agent"
+                         Description="Nhận job triển khai phần mềm từ RyanDeploy server qua HTTPS outbound."
+                         Type="ownProcess"
+                         Start="auto"
+                         Account="LocalSystem"
+                         ErrorControl="normal"
+                         Vital="yes" />
+
+        <ServiceControl Id="RyanDeployAgentServiceControl"
+                         Name="RyanDeployAgent"
+                         Start="install"
+                         Stop="both"
+                         Remove="uninstall"
+                         Wait="yes" />
+      </Component>
+
+      <Component Id="ProgramDataFolderComponent" Directory="PROGRAMDATAFOLDER" Guid="B58CFBA7-2505-495F-B9C3-BA665AA07312">
+        <CreateFolder />
+        <!--
+          KHÔNG xoá C:\ProgramData\RyanDeployAgent lúc uninstall (agent.ini chứa token bí mật
+          và log lịch sử) — để admin tự dọn thủ công nếu thật sự muốn xoá sạch máy.
+          RemoveFolder mặc định của WiX chỉ xoá lúc uninstall nếu component bị gỡ VÀ thư mục
+          rỗng; ở đây cố tình không khai báo RemoveFolder On="uninstall" để tránh mất log/token
+          ngoài ý muốn.
+        -->
+      </Component>
+    </ComponentGroup>
+  </Product>
+</Wix>

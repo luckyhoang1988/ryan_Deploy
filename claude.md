@@ -4,6 +4,18 @@
 
 ---
 
+## ⚠️ Quy tắc làm việc bắt buộc (Claude Code trong repo này)
+
+- Khi thực hiện một kế hoạch/plan nhiều phần (§1, §2, §3... hoặc nhiều bước trong TodoWrite):
+  làm xong **một phần** (đã test/pass) thì **dừng lại**, báo cáo ngắn gọn, và **hỏi user** có
+  muốn làm tiếp phần kế tiếp không — không tự động chạy liền một mạch hết các phần chỉ vì kế
+  hoạch tổng thể đã được duyệt trước đó. Chỉ chạy liên tục nếu user nói rõ "làm hết, không cần
+  hỏi lại" cho lần đó.
+- Xem thêm skill `engineering-discipline` (`.claude/skills/engineering-discipline/SKILL.md`)
+  cho checklist kỷ luật kỹ thuật đầy đủ.
+
+---
+
 ## 📋 **Mục Lục**
 
 1. [Setup Claude API](#setup-claude-api)

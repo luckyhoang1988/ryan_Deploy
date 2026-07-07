@@ -15,6 +15,7 @@ export default function Machines() {
   const [busy, setBusy] = useState("");
   const [showConfig, setShowConfig] = useState(false);
   const [showSyncModal, setShowSyncModal] = useState(false);
+  const [agentModalMachine, setAgentModalMachine] = useState(null);
 
   // Filters
   const [search, setSearch] = useState("");
@@ -200,7 +201,11 @@ export default function Machines() {
       {err && <p className="error">{err}</p>}
       <table>
         <thead>
-          <tr><th>Hostname</th><th>FQDN</th><th>OS</th><th>OU</th><th>Trạng thái</th></tr>
+          <tr>
+            <th>Hostname</th><th>FQDN</th><th>OS</th><th>OU</th><th>Trạng thái</th>
+            <th>Kết nối</th><th>Agent</th>
+            {hasRole("admin") && <th></th>}
+          </tr>
         </thead>
         <tbody>
           {machines.map((m) => (
@@ -214,9 +219,22 @@ export default function Machines() {
                   {m.is_online ? "Online" : "Offline"}
                 </span>
               </td>
+              <td>
+                <span className={`badge ${m.connection_mode === "agent" ? "info" : "default"}`}>
+                  {m.connection_mode === "agent" ? "Agent" : "SMB"}
+                </span>
+              </td>
+              <td className="muted">{m.agent_version || "—"}</td>
+              {hasRole("admin") && (
+                <td>
+                  <button className="btn ghost" style={{ padding: "4px 10px" }} onClick={() => setAgentModalMachine(m)}>
+                    Agent…
+                  </button>
+                </td>
+              )}
             </tr>
           ))}
-          {machines.length === 0 && <tr><td colSpan="5" className="muted">Không tìm thấy máy nào.</td></tr>}
+          {machines.length === 0 && <tr><td colSpan="8" className="muted">Không tìm thấy máy nào.</td></tr>}
         </tbody>
       </table>
 
@@ -235,6 +253,134 @@ export default function Machines() {
           busy={busy}
         />
       )}
+      {agentModalMachine && (
+        <AgentTokenModal
+          machine={agentModalMachine}
+          onClose={() => setAgentModalMachine(null)}
+          onChanged={() => load(page)}
+        />
+      )}
+    </div>
+  );
+}
+
+function AgentTokenModal({ machine, onClose, onChanged }) {
+  const [connectionMode, setConnectionMode] = useState(machine.connection_mode || "smb");
+  const [token, setToken] = useState("");
+  const [tokenInfo, setTokenInfo] = useState(null);
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState("");
+
+  const loadTokenInfo = useCallback(async () => {
+    try {
+      const d = await api.get(`/machines/${machine.id}/`);
+      setTokenInfo(d.agent_token || null);
+    } catch (e) { /* không chặn modal nếu load info lỗi */ }
+  }, [machine.id]);
+
+  useEffect(() => { loadTokenInfo(); }, [loadTokenInfo]);
+
+  const fmt = (iso) => (iso ? new Date(iso).toLocaleString() : "—");
+
+  const saveMode = async () => {
+    setBusy("mode"); setErr(""); setMsg("");
+    try {
+      await api.patch(`/machines/${machine.id}/`, { connection_mode: connectionMode });
+      setMsg("Đã lưu chế độ kết nối.");
+      onChanged?.();
+    } catch (e) { setErr(e.message); } finally { setBusy(""); }
+  };
+
+  const provisionToken = async () => {
+    if (!confirm(`Cấp token agent mới cho ${machine.hostname}? Token cũ (nếu có) sẽ bị thu hồi ngay.`)) return;
+    setBusy("provision"); setErr(""); setMsg(""); setToken("");
+    try {
+      const r = await api.post(`/machines/${machine.id}/provision_agent_token/`, {});
+      setToken(r.token);
+      setMsg("Đã cấp token mới — chỉ hiển thị MỘT LẦN, hãy sao chép ngay.");
+      await loadTokenInfo();
+    } catch (e) { setErr(e.message); } finally { setBusy(""); }
+  };
+
+  const revokeToken = async () => {
+    if (!confirm(`Thu hồi token agent hiện tại của ${machine.hostname}?`)) return;
+    setBusy("revoke"); setErr(""); setMsg(""); setToken("");
+    try {
+      const r = await api.post(`/machines/${machine.id}/revoke_agent_token/`, {});
+      setMsg(r.revoked ? "Đã thu hồi token." : "Máy này chưa có token nào đang hoạt động.");
+      await loadTokenInfo();
+    } catch (e) { setErr(e.message); } finally { setBusy(""); }
+  };
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 480 }}>
+        <h3>Agent — {machine.hostname}</h3>
+
+        <label>Chế độ kết nối</label>
+        <div className="row" style={{ gap: 8 }}>
+          <select value={connectionMode} onChange={(e) => setConnectionMode(e.target.value)} style={{ flex: 1 }}>
+            <option value="smb">SMB push (agentless)</option>
+            <option value="agent">Agent (outbound HTTPS)</option>
+          </select>
+          <button className="btn ghost" onClick={saveMode} disabled={busy}>
+            {busy === "mode" ? "Đang lưu…" : "Lưu"}
+          </button>
+        </div>
+
+        <hr style={{ margin: "16px 0", border: "none", borderTop: "1px solid var(--border, #333)" }} />
+
+        <div className="row spread" style={{ alignItems: "center" }}>
+          <div>
+            <div><strong>Token agent</strong></div>
+            <div className="muted" style={{ fontSize: 12 }}>
+              Cấp mới sẽ thu hồi token cũ ngay lập tức. Chỉ hiển thị đúng 1 lần.
+            </div>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <button className="btn ghost" onClick={revokeToken} disabled={busy}>
+              {busy === "revoke" ? "Đang thu hồi…" : "Thu hồi"}
+            </button>
+            <button className="btn" onClick={provisionToken} disabled={busy}>
+              {busy === "provision" ? "Đang cấp…" : "Cấp token mới"}
+            </button>
+          </div>
+        </div>
+
+        {token && (
+          <div className="mt" style={{ background: "var(--panel, #1a1a1a)", padding: 10, borderRadius: 6 }}>
+            <code style={{ wordBreak: "break-all", userSelect: "all" }}>{token}</code>
+          </div>
+        )}
+
+        <div className="mt" style={{ fontSize: 12 }}>
+          {tokenInfo ? (
+            <>
+              <div>
+                Token hiện tại: <code>{tokenInfo.token_prefix}…</code>{" "}
+                <span className={`badge ${tokenInfo.is_active ? "info" : "default"}`}>
+                  {tokenInfo.is_active ? "Đang hoạt động" : "Đã thu hồi"}
+                </span>
+              </div>
+              <div className="muted">Cấp lúc: {fmt(tokenInfo.created_at)}</div>
+              <div className="muted">Lần dùng cuối: {fmt(tokenInfo.last_used_at)}</div>
+              {tokenInfo.revoked_at && (
+                <div className="muted">Thu hồi lúc: {fmt(tokenInfo.revoked_at)}</div>
+              )}
+            </>
+          ) : (
+            <span className="muted">Máy này chưa từng được cấp token agent.</span>
+          )}
+        </div>
+
+        {msg && <p className="muted mt">{msg}</p>}
+        {err && <p className="error mt">{err}</p>}
+
+        <div className="row spread mt">
+          <button type="button" className="btn ghost" onClick={onClose}>Đóng</button>
+        </div>
+      </div>
     </div>
   );
 }

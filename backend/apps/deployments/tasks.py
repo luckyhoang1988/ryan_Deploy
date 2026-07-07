@@ -85,9 +85,31 @@ def reconcile_stuck_deployments():
     deployment sẽ kẹt ở RUNNING vĩnh viễn. Task này quét các deployment RUNNING mà
     MỌI job đã ở trạng thái kết thúc rồi gọi finalize để tổng kết lại.
     """
+    from django.conf import settings
+
     from apps.deployments.semaphore import release_slot
     from apps.jobs.models import Job, JobStatus
     from apps.jobs.tasks import _job_timeout, finalize_deployment
+    from apps.machines.models import ConnectionMode
+
+    # Job của máy connection_mode=agent ở QUEUED quá lâu mà agent chưa từng poll tới (agent
+    # offline/chưa cài) — không có chord/task nào theo dõi job QUEUED chưa claim (khác SMB,
+    # nơi deploy_to_machine tự lo qua Celery retry), nên phải tự đánh FAILED ở đây để không
+    # kẹt vô thời hạn. Job QUEUED chưa claim thì chưa từng xin slot semaphore → không cần
+    # release_slot (đối xứng với việc chỉ AgentJobPollView xin slot lúc claim thành công).
+    agent_queue_timeout = settings.RYANDEPLOY.get("AGENT_JOB_QUEUE_TIMEOUT", 3600)
+    queued_cutoff = timezone.now() - timedelta(seconds=agent_queue_timeout)
+    agent_queued_failed = 0
+    for job in Job.objects.filter(
+        status=JobStatus.QUEUED, machine__connection_mode=ConnectionMode.AGENT, created_at__lt=queued_cutoff,
+    ):
+        updated = Job.objects.filter(pk=job.pk, status=JobStatus.QUEUED).update(
+            status=JobStatus.FAILED,
+            error_output="Agent chưa từng poll job này quá hạn — nghi agent offline/chưa cài đặt.",
+            finished_at=timezone.now(),
+        )
+        if updated:
+            agent_queued_failed += 1
 
     terminal = [
         JobStatus.SUCCESS,
@@ -147,7 +169,10 @@ def reconcile_stuck_deployments():
         reconciled += 1
         logger.info("Reconcile: tổng kết lại deployment kẹt RUNNING %s", dep_id)
 
-    return {"reconciled": reconciled, "failed": failed, "stale_jobs_failed": stale_jobs_failed}
+    return {
+        "reconciled": reconciled, "failed": failed, "stale_jobs_failed": stale_jobs_failed,
+        "agent_queued_failed": agent_queued_failed,
+    }
 
 
 @shared_task

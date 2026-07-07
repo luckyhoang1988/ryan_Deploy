@@ -12,6 +12,7 @@ from django.utils import timezone
 
 from apps.jobs.models import Job, JobStatus
 from apps.jobs.tasks import deploy_to_machine, finalize_deployment
+from apps.machines.models import ConnectionMode
 
 from .models import DeploymentStatus
 from .semaphore import clear_slots
@@ -62,11 +63,21 @@ def launch_deployment(deployment) -> int:
     deployment.finished_at = None
     deployment.save(update_fields=["status", "started_at", "finished_at"])
 
-    # Fan-out song song + callback tổng kết
-    header = [deploy_to_machine.s(jid) for jid in job_ids]
-    chord(header)(finalize_deployment.s(deployment.id))
+    # Chỉ máy connection_mode=smb được dispatch NGAY qua Celery chord (server chủ động đẩy).
+    # Job của máy connection_mode=agent giữ nguyên QUEUED — AgentJobPollView sẽ claim khi
+    # agent tự poll tới; reconcile_stuck_deployments đảm nhiệm finalize khi tất cả job (kể
+    # cả agent) đã xong, vì không có chord nào chờ chúng.
+    smb_job_ids = [
+        jid for jid, machine in zip(job_ids, machines) if machine.connection_mode == ConnectionMode.SMB
+    ]
+    if smb_job_ids:
+        header = [deploy_to_machine.s(jid) for jid in smb_job_ids]
+        chord(header)(finalize_deployment.s(deployment.id))
 
-    logger.info("Deployment %s: đẩy %s job", deployment.id, len(job_ids))
+    logger.info(
+        "Deployment %s: đẩy %s job (%s qua SMB, %s chờ agent poll)",
+        deployment.id, len(job_ids), len(smb_job_ids), len(job_ids) - len(smb_job_ids),
+    )
     return len(job_ids)
 
 

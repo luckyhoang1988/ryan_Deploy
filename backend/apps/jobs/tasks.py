@@ -556,6 +556,18 @@ def finalize_deployment(_results, deployment_id: int):
         )
         return
 
+    # Deployment lai (mix SMB+agent): chord chỉ chờ job SMB nên có thể fire khi job agent
+    # vẫn còn QUEUED/RUNNING (agent chưa poll/chưa report xong). Không được tính status lúc
+    # này — reconcile_stuck_deployments (watchdog định kỳ) sẽ gọi lại khi mọi job đã terminal.
+    terminal = [
+        JobStatus.SUCCESS, JobStatus.SUCCESS_REBOOT, JobStatus.FAILED, JobStatus.SKIPPED, JobStatus.CANCELLED,
+    ]
+    if deployment.jobs.exclude(status__in=terminal).exists():
+        logger.info(
+            "finalize_deployment: %s còn job chưa kết thúc (agent chưa report) — bỏ qua", deployment_id,
+        )
+        return
+
     total = deployment.total_count
     failed = deployment.failed_count
     success = deployment.success_count

@@ -15,7 +15,8 @@ from django.utils import timezone
 
 logger = logging.getLogger("apps.deployments")
 
-_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "scripts", "inventory.ps1")
+# Public: agent (apps.agents.views) phục vụ script này qua whitelist /api/agent/scripts/.
+SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "scripts", "inventory.ps1")
 _INVENTORY_COMMAND = 'powershell -NoProfile -ExecutionPolicy Bypass -File "{file}"'
 
 
@@ -24,7 +25,7 @@ def build_inventory_plan(deployment, machine):
 
     return ActionPlan(
         command=_INVENTORY_COMMAND,
-        payload_path=_SCRIPT_PATH,
+        payload_path=SCRIPT_PATH,
         payload_filename="ryandeploy_inventory.ps1",
         success_exit_codes=[0],
         verify_installer=False,

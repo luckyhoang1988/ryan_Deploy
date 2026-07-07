@@ -19,7 +19,33 @@ class MachineSerializer(serializers.ModelSerializer):
             "is_online",
             "last_seen",
             "enabled",
+            "connection_mode",
+            "agent_version",
         ]
+        read_only_fields = ["agent_version"]
+
+
+class MachineDetailSerializer(MachineSerializer):
+    """Serializer cho machine detail — thêm trạng thái token agent (không bao giờ lộ token
+    gốc, chỉ prefix + mốc thời gian) để admin theo dõi token 'chết' (agent ngừng poll) hoặc
+    đã bị thu hồi. Tách riêng khỏi MachineSerializer để tránh N+1 query khi list nhiều máy."""
+
+    agent_token = serializers.SerializerMethodField()
+
+    class Meta(MachineSerializer.Meta):
+        fields = MachineSerializer.Meta.fields + ["agent_token"]
+
+    def get_agent_token(self, obj):
+        token = obj.agent_tokens.order_by("-created_at").first()
+        if token is None:
+            return None
+        return {
+            "token_prefix": token.token_prefix,
+            "created_at": token.created_at,
+            "last_used_at": token.last_used_at,
+            "revoked_at": token.revoked_at,
+            "is_active": token.is_active,
+        }
 
 
 class ADConfigSerializer(serializers.ModelSerializer):

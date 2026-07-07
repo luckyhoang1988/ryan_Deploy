@@ -3,6 +3,11 @@ from django.db import models
 from apps.core.models import TimeStampedModel
 
 
+class ConnectionMode(models.TextChoices):
+    SMB = "smb", "SMB push (agentless)"
+    AGENT = "agent", "Agent (outbound HTTPS)"
+
+
 class Machine(TimeStampedModel):
     """Một máy trạm Windows trong domain — mục tiêu đẩy phần mềm."""
 
@@ -21,6 +26,12 @@ class Machine(TimeStampedModel):
     last_seen = models.DateTimeField(null=True, blank=True)
 
     enabled = models.BooleanField(default=True, help_text="Cho phép đẩy phần mềm tới máy này")
+
+    connection_mode = models.CharField(
+        max_length=8, choices=ConnectionMode.choices, default=ConnectionMode.SMB, db_index=True,
+        help_text="Kênh vận chuyển khi đẩy job: SMB push (server chủ động) hay Agent (máy tự poll qua HTTPS)",
+    )
+    agent_version = models.CharField(max_length=32, blank=True, help_text="Phiên bản agent đang chạy trên máy, do agent tự báo qua heartbeat")
 
     class Meta:
         ordering = ["hostname"]

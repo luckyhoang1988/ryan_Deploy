@@ -257,6 +257,7 @@ function MachineRow({ m, depth, checked, onToggle }) {
         title={m.enabled ? (m.is_online ? "Online" : "Offline") : "Đã tắt — sẽ không chạy"}
       />
       <span className="machine-name">{m.hostname}</span>
+      {m.connection_mode === "agent" && <span className="badge info machine-off-badge">Agent</span>}
       {!m.enabled && <span className="badge default machine-off-badge">Đã tắt</span>}
     </label>
   );

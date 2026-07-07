@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     "apps.deployments",
     "apps.jobs",
     "apps.audit",
+    "apps.agents",
 ]
 
 MIDDLEWARE = [
@@ -137,6 +138,11 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "login": "10/min",  # chống brute-force đăng nhập
         "deployment_action": "30/min",  # chống spam trigger/cancel deployment
+        # Agent (mặt phẳng tin cậy máy — throttle theo machine, xem AgentScopedRateThrottle)
+        "agent_poll": "20/min",
+        "agent_heartbeat": "6/min",
+        "agent_report": "20/min",
+        "agent_download": "10/min",
     },
 }
 
@@ -202,6 +208,10 @@ RYANDEPLOY = {
     # Mặc định 64 (tăng từ 32 hardcode cũ) vì mỗi máy giờ có thể tốn tới ~5.5s worst-case
     # (ping + TCP 135 + TCP 445) thay vì chỉ 1 TCP check trước đây.
     "MACHINE_ONLINE_SCAN_WORKERS": env_int("RYANDEPLOY_MACHINE_ONLINE_SCAN_WORKERS", 64),
+    # --- Agent (chế độ outbound HTTPS, song song SMB) ---
+    # Job của máy connection_mode=agent ở QUEUED quá lâu mà agent chưa từng poll tới (agent
+    # offline/chưa cài) -> tự đánh FAILED thay vì kẹt vô thời hạn (xem reconcile_stuck_deployments).
+    "AGENT_JOB_QUEUE_TIMEOUT": env_int("RYANDEPLOY_AGENT_JOB_QUEUE_TIMEOUT", 3600),
 }
 
 # Chặn body form phi-file quá lớn (không áp cho file upload — file đã có trần riêng ở

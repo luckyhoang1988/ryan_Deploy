@@ -12,7 +12,7 @@ from apps.credentials.models import DeployCredential
 from apps.deployments.models import Deployment, DeploymentStatus
 from apps.deployments.tasks import reconcile_stuck_deployments
 from apps.jobs.models import Job, JobStatus
-from apps.machines.models import Machine
+from apps.machines.models import ConnectionMode, Machine
 from apps.packages.models import InstallerType, Package, PackageVersion
 
 
@@ -72,3 +72,31 @@ def test_stale_running_job_marked_failed_and_deployment_finalized(deployment, _n
     assert result["stale_jobs_failed"] == 1
     assert result["reconciled"] == 1
     assert deployment.id in _no_redis  # release_slot đã được gọi cho job kẹt
+
+
+def test_agent_job_queued_past_timeout_marked_failed(deployment, settings):
+    """Job của máy connection_mode=agent ở QUEUED quá AGENT_JOB_QUEUE_TIMEOUT (agent chưa
+    từng poll tới — offline/chưa cài) phải tự đánh FAILED, không kẹt vô thời hạn."""
+    settings.RYANDEPLOY = {**settings.RYANDEPLOY, "AGENT_JOB_QUEUE_TIMEOUT": 3600}
+    m = Machine.objects.create(hostname="AGENT-STUCK", connection_mode=ConnectionMode.AGENT)
+    stuck_job = Job.objects.create(deployment=deployment, machine=m, status=JobStatus.QUEUED)
+    Job.objects.filter(pk=stuck_job.pk).update(created_at=timezone.now() - timedelta(hours=2))
+
+    result = reconcile_stuck_deployments()
+
+    stuck_job.refresh_from_db()
+    assert stuck_job.status == JobStatus.FAILED
+    assert "Agent chưa từng poll" in stuck_job.error_output
+    assert result["agent_queued_failed"] == 1
+
+
+def test_agent_job_queued_within_timeout_left_untouched(deployment, settings):
+    settings.RYANDEPLOY = {**settings.RYANDEPLOY, "AGENT_JOB_QUEUE_TIMEOUT": 3600}
+    m = Machine.objects.create(hostname="AGENT-FRESH", connection_mode=ConnectionMode.AGENT)
+    job = Job.objects.create(deployment=deployment, machine=m, status=JobStatus.QUEUED)
+
+    result = reconcile_stuck_deployments()
+
+    job.refresh_from_db()
+    assert job.status == JobStatus.QUEUED
+    assert result["agent_queued_failed"] == 0
