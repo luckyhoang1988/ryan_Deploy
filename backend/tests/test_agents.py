@@ -5,18 +5,30 @@ Chế độ agent (outbound HTTPS, song song SMB — xem plan_agent.md):
 - views: poll (claim nguyên tử), download (chặn ngoài phạm vi job RUNNING), report, heartbeat.
 - MachineViewSet: provision/revoke/bulk-provision token chỉ admin.
 """
+from datetime import timedelta
+
 import pytest
 from django.contrib.auth.models import Group, User
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db.models import F
 from django.test import Client
 from django.utils import timezone
 from rest_framework import exceptions
 from rest_framework.test import APIClient, APIRequestFactory
 
 from apps.agents.auth import AgentTokenAuthentication
-from apps.agents.models import AgentToken
+from apps.agents.models import AgentToken, EnrollmentSecret
 from apps.agents.permissions import IsAuthenticatedAgent
-from apps.agents.services import hash_token, issue_token, revoke_token
+from apps.agents.services import (
+    EnrollmentError,
+    enroll_machine,
+    hash_token,
+    issue_enrollment_secret,
+    issue_token,
+    revoke_enrollment_secret,
+    revoke_token,
+)
+from apps.audit.models import AuditLog
 from apps.credentials.models import DeployCredential
 from apps.deployments.models import Deployment, DeploymentAction
 from apps.deployments import semaphore
@@ -459,3 +471,232 @@ def test_bulk_set_connection_mode_requires_admin(admin_client, operator_client, 
         content_type="application/json",
     )
     assert resp_admin.status_code == 200
+
+
+# ---------------- services.py: issue_enrollment_secret / revoke_enrollment_secret / enroll_machine ----------------
+
+
+def _future(hours=1):
+    return timezone.now() + timedelta(hours=hours)
+
+
+def test_enroll_success_issues_token_and_audit(agent_machine):
+    raw_secret, secret = issue_enrollment_secret("", _future())
+    raw_token, machine = enroll_machine(raw_secret, agent_machine.hostname)
+
+    assert machine.pk == agent_machine.pk
+    assert AgentToken.objects.get(machine=agent_machine).token_hash == hash_token(raw_token)
+    secret.refresh_from_db()
+    assert secret.use_count == 1
+
+
+def test_enroll_success_global_secret_any_ou(db):
+    machine = Machine.objects.create(hostname="ANY-OU-PC", ad_ou="OU=Whatever,DC=corp", enabled=True)
+    raw_secret, _ = issue_enrollment_secret("", _future())  # ad_ou trống = global
+    raw_token, enrolled = enroll_machine(raw_secret, machine.hostname)
+    assert enrolled.pk == machine.pk
+    assert AgentToken.objects.filter(machine=machine, token_hash=hash_token(raw_token)).exists()
+
+
+def test_enroll_success_scoped_ou_matches_sub_ou(db):
+    machine = Machine.objects.create(hostname="SUB-OU-PC", ad_ou="OU=Sub,OU=Warehouse,DC=corp", enabled=True)
+    raw_secret, _ = issue_enrollment_secret("OU=Warehouse,DC=corp", _future())
+    _, enrolled = enroll_machine(raw_secret, machine.hostname)
+    assert enrolled.pk == machine.pk
+
+
+def test_enroll_rejects_unknown_hostname(db):
+    raw_secret, _ = issue_enrollment_secret("", _future())
+    with pytest.raises(EnrollmentError, match="chưa tồn tại"):
+        enroll_machine(raw_secret, "GHOST-PC")
+
+
+def test_enroll_rejects_disabled_machine(db):
+    machine = Machine.objects.create(hostname="DISABLED-PC", enabled=False)
+    raw_secret, _ = issue_enrollment_secret("", _future())
+    with pytest.raises(EnrollmentError, match="vô hiệu hóa"):
+        enroll_machine(raw_secret, machine.hostname)
+
+
+def test_enroll_rejects_wrong_ou(db):
+    machine = Machine.objects.create(hostname="WRONG-OU-PC", ad_ou="OU=Office,DC=corp", enabled=True)
+    raw_secret, _ = issue_enrollment_secret("OU=Warehouse,DC=corp", _future())
+    with pytest.raises(EnrollmentError, match="phạm vi OU"):
+        enroll_machine(raw_secret, machine.hostname)
+
+
+def test_enroll_rejects_expired_secret(agent_machine):
+    raw_secret, secret = issue_enrollment_secret("", _future(hours=1))
+    EnrollmentSecret.objects.filter(pk=secret.pk).update(expires_at=timezone.now() - timedelta(minutes=1))
+    with pytest.raises(EnrollmentError, match="hết hạn"):
+        enroll_machine(raw_secret, agent_machine.hostname)
+
+
+def test_enroll_rejects_revoked_secret(agent_machine):
+    raw_secret, secret = issue_enrollment_secret("", _future())
+    revoke_enrollment_secret(secret)
+    with pytest.raises(EnrollmentError, match="thu hồi"):
+        enroll_machine(raw_secret, agent_machine.hostname)
+
+
+def test_enroll_rejects_max_uses_exhausted(db):
+    m1 = Machine.objects.create(hostname="MU-PC1", enabled=True)
+    m2 = Machine.objects.create(hostname="MU-PC2", enabled=True)
+    raw_secret, _secret = issue_enrollment_secret("", _future(), max_uses=1)
+
+    enroll_machine(raw_secret, m1.hostname)  # dùng hết lượt duy nhất
+
+    with pytest.raises(EnrollmentError, match="hết lượt"):
+        enroll_machine(raw_secret, m2.hostname)
+
+
+def test_enroll_rejects_machine_already_has_active_token(agent_machine):
+    issue_token(agent_machine)  # máy đã có token active từ trước (vd cấp thủ công)
+    raw_secret, _ = issue_enrollment_secret("", _future())
+    with pytest.raises(EnrollmentError, match="đã có token agent đang hoạt động"):
+        enroll_machine(raw_secret, agent_machine.hostname)
+
+
+def test_enroll_rejects_invalid_secret(agent_machine):
+    with pytest.raises(EnrollmentError, match="không hợp lệ"):
+        enroll_machine("not-a-real-secret", agent_machine.hostname)
+
+
+def test_enroll_hostname_case_insensitive(db):
+    machine = Machine.objects.create(hostname="CaseSensitive-PC", enabled=True)
+    raw_secret, _ = issue_enrollment_secret("", _future())
+    _, enrolled = enroll_machine(raw_secret, "casesensitive-pc")
+    assert enrolled.pk == machine.pk
+
+
+def test_enroll_race_simulated_via_monkeypatch(db):
+    """
+    enroll_machine() tăng use_count bằng 1 câu UPDATE nguyên tử ở tầng SQL
+    (`EnrollmentSecret.objects.filter(pk=...).update(use_count=F("use_count") + 1)`), không
+    phải kiểu đọc-rồi-ghi phía Python (sẽ mất update nếu 2 request race nhau ghi đè lên nhau).
+    Test này xác nhận trực tiếp tính chất "không mất update" của câu UPDATE đó — không dựng
+    thread thật vì SQLite test không chịu được ghi đa luồng (xem test_phase2.py). Việc chặn
+    đúng 2 request /enroll đồng thời không "cùng vượt qua" điều kiện max_uses/expires_at (đọc
+    rồi mới quyết định) phụ thuộc vào select_for_update() khóa hàng EnrollmentSecret trong
+    enroll_machine() — cơ chế lock đó chỉ có hiệu lực thật trên Postgres production, SQLite bỏ
+    qua (no-op) nên không thể kiểm chứng bằng test tự động ở đây.
+    """
+    _raw_secret, secret = issue_enrollment_secret("", _future())
+
+    # Mô phỏng 2 UPDATE race nhau bằng đúng biểu thức F() mà enroll_machine() dùng.
+    EnrollmentSecret.objects.filter(pk=secret.pk).update(use_count=F("use_count") + 1)
+    EnrollmentSecret.objects.filter(pk=secret.pk).update(use_count=F("use_count") + 1)
+
+    secret.refresh_from_db()
+    assert secret.use_count == 2  # không có update nào bị mất
+
+
+# ---------------- views.py: AgentEnrollView (/api/agent/enroll/, không cần token) ----------------
+
+
+def test_enroll_endpoint_success_returns_token_and_audit(agent_machine):
+    raw_secret, _ = issue_enrollment_secret("", _future())
+    client = APIClient()
+    resp = client.post(
+        "/api/agent/enroll/", {"secret": raw_secret, "hostname": agent_machine.hostname}, format="json",
+    )
+    assert resp.status_code == 201
+    raw_token = resp.json()["token"]
+    assert AgentToken.objects.get(machine=agent_machine).token_hash == hash_token(raw_token)
+    assert AuditLog.objects.filter(action=AuditLog.Action.AGENT_ENROLL).exists()
+
+
+def test_enroll_endpoint_missing_fields_returns_400(db):
+    client = APIClient()
+    resp = client.post("/api/agent/enroll/", {"hostname": "X"}, format="json")
+    assert resp.status_code == 400
+
+
+def test_enroll_endpoint_rejects_bad_secret_with_403(agent_machine):
+    client = APIClient()
+    resp = client.post(
+        "/api/agent/enroll/", {"secret": "bogus", "hostname": agent_machine.hostname}, format="json",
+    )
+    assert resp.status_code == 403
+
+
+def test_enroll_endpoint_works_without_authorization_header(agent_machine):
+    """Endpoint /enroll là điểm untrusted DUY NHẤT của mặt phẳng agent (máy chưa có token) —
+    KHÔNG được yêu cầu Authorization, khác mọi view agent khác (_AgentAPIView)."""
+    raw_secret, _ = issue_enrollment_secret("", _future())
+    client = APIClient()  # không set credentials/Authorization
+    resp = client.post(
+        "/api/agent/enroll/", {"secret": raw_secret, "hostname": agent_machine.hostname}, format="json",
+    )
+    assert resp.status_code == 201
+
+
+# ---------------- Admin API: EnrollmentSecretViewSet (/api/enrollment-secrets/) ----------------
+
+
+def test_create_enrollment_secret_admin_only(admin_client, operator_client, db):
+    resp_operator = operator_client.post(
+        "/api/enrollment-secrets/", {"ad_ou": "", "expires_in_hours": 48}, content_type="application/json",
+    )
+    assert resp_operator.status_code == 403
+
+    resp_admin = admin_client.post(
+        "/api/enrollment-secrets/", {"ad_ou": "", "expires_in_hours": 48}, content_type="application/json",
+    )
+    assert resp_admin.status_code == 201
+
+
+def test_create_enrollment_secret_returns_raw_secret_once(admin_client, db):
+    resp = admin_client.post(
+        "/api/enrollment-secrets/",
+        {"ad_ou": "OU=Warehouse,DC=corp", "expires_in_hours": 24, "max_uses": 100, "note": "rollout"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert "secret" in data and len(data["secret"]) > 20
+    secret = EnrollmentSecret.objects.get(pk=data["id"])
+    assert secret.secret_hash == hash_token(data["secret"])
+    assert secret.note == "rollout"
+    assert AuditLog.objects.filter(action=AuditLog.Action.AGENT_ENROLLMENT_SECRET_CREATE).exists()
+
+
+def test_create_enrollment_secret_requires_expiry(admin_client, db):
+    resp = admin_client.post("/api/enrollment-secrets/", {"ad_ou": ""}, content_type="application/json")
+    assert resp.status_code == 400
+
+
+def test_list_never_exposes_hash(admin_client, db):
+    issue_enrollment_secret("", _future())
+    resp = admin_client.get("/api/enrollment-secrets/")
+    assert resp.status_code == 200
+    body = resp.json()
+    items = body["results"] if isinstance(body, dict) and "results" in body else body
+    assert len(items) == 1
+    assert "secret_hash" not in items[0]
+    assert "secret" not in items[0]
+    assert items[0]["secret_prefix"]
+
+
+def test_revoke_enrollment_secret_via_api(admin_client, db):
+    raw_secret, secret = issue_enrollment_secret("", _future())
+    resp = admin_client.post(f"/api/enrollment-secrets/{secret.pk}/revoke/")
+    assert resp.status_code == 200
+    assert resp.json()["revoked"] is True
+    secret.refresh_from_db()
+    assert secret.revoked_at is not None
+    assert AuditLog.objects.filter(action=AuditLog.Action.AGENT_ENROLLMENT_SECRET_REVOKE).exists()
+
+    # Đã revoke -> secret không còn dùng được để enroll.
+    with pytest.raises(EnrollmentError, match="thu hồi"):
+        enroll_machine(raw_secret, "ANY-PC")
+
+
+def test_enrollment_secret_update_and_delete_not_allowed(admin_client, db):
+    _secret_raw, secret = issue_enrollment_secret("", _future())
+    resp_put = admin_client.put(
+        f"/api/enrollment-secrets/{secret.pk}/", {"note": "x"}, content_type="application/json",
+    )
+    assert resp_put.status_code == 405
+    resp_delete = admin_client.delete(f"/api/enrollment-secrets/{secret.pk}/")
+    assert resp_delete.status_code == 405

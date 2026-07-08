@@ -20,7 +20,16 @@ class AgentClient:
     def __init__(self, config: AgentConfig, session: Optional[requests.Session] = None):
         self._config = config
         self._session = session or requests.Session()
-        self._session.headers["Authorization"] = f"Bearer {config.token}"
+        # Máy chưa enroll không có token thật — request tới /enroll (mặt phẳng chưa tin cậy)
+        # không được kèm header Authorization.
+        if config.token:
+            self._session.headers["Authorization"] = f"Bearer {config.token}"
+
+    def enroll(self, secret: str, hostname: str) -> str:
+        """Đổi enrollment secret lấy token thật (xem enrollment.py). Không kèm Authorization —
+        chỉ hợp lệ khi config chưa có token, đúng lúc __init__ không set header này."""
+        resp = self._request("POST", "/api/agent/enroll/", json={"secret": secret, "hostname": hostname})
+        return resp.json()["token"]
 
     def poll_job(self) -> Optional[dict]:
         """Trả dict job nếu server có job đang chờ cho máy này, None nếu không có."""

@@ -13,7 +13,9 @@ from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.audit.models import AuditLog
@@ -29,6 +31,7 @@ from apps.packages.repository import verify_integrity
 
 from .auth import AgentTokenAuthentication
 from .permissions import IsAuthenticatedAgent
+from .services import EnrollmentError, enroll_machine
 from .throttling import AgentScopedRateThrottle
 
 logger = logging.getLogger("apps.agents")
@@ -278,3 +281,32 @@ class AgentHeartbeatView(_AgentAPIView):
             fields["agent_version"] = agent_version
         Machine.objects.filter(pk=machine.pk).update(**fields)
         return Response({"detail": "ok"})
+
+
+class AgentEnrollView(APIView):
+    """
+    Điểm untrusted DUY NHẤT của mặt phẳng agent (máy chưa có token) — cố tình KHÔNG kế thừa
+    _AgentAPIView (gắn cứng AgentTokenAuthentication). Throttle theo IP nguồn (ScopedRateThrottle
+    mặc định), không theo machine vì machine chưa xác thực được.
+    """
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "agent_enroll"
+
+    def post(self, request):
+        secret = (request.data.get("secret") or "").strip()
+        hostname = (request.data.get("hostname") or "").strip()
+        if not secret or not hostname:
+            return Response({"detail": "Thiếu secret hoặc hostname."}, status=status.HTTP_400_BAD_REQUEST)
+
+        source_ip = request.META.get("REMOTE_ADDR", "")
+        try:
+            raw_token, machine = enroll_machine(secret, hostname, source_ip=source_ip)
+        except EnrollmentError as e:
+            logger.warning("Enroll thất bại (hostname=%s, ip=%s): %s", hostname, source_ip, e)
+            return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
+
+        AuditLog.record(AuditLog.Action.AGENT_ENROLL, target=machine, machine_hostname=machine.hostname)
+        return Response({"token": raw_token}, status=status.HTTP_201_CREATED)

@@ -15,6 +15,7 @@ export default function Machines() {
   const [busy, setBusy] = useState("");
   const [showConfig, setShowConfig] = useState(false);
   const [showSyncModal, setShowSyncModal] = useState(false);
+  const [showEnrollModal, setShowEnrollModal] = useState(false);
   const [agentModalMachine, setAgentModalMachine] = useState(null);
 
   // Filters
@@ -117,6 +118,11 @@ export default function Machines() {
           {hasRole("admin") && (
             <button className="btn ghost" onClick={() => setShowSyncModal(true)} disabled={busy}>
               {busy === "ad" ? "Đang sync…" : "Sync AD"}
+            </button>
+          )}
+          {hasRole("admin") && (
+            <button className="btn ghost" onClick={() => setShowEnrollModal(true)} disabled={busy}>
+              Enrollment Secrets
             </button>
           )}
           {hasRole("admin") && (
@@ -244,6 +250,9 @@ export default function Machines() {
           onChanged={() => load(page)}
         />
       )}
+      {showEnrollModal && (
+        <EnrollmentSecretsModal onClose={() => setShowEnrollModal(false)} />
+      )}
     </div>
   );
 }
@@ -360,6 +369,150 @@ function AgentTokenModal({ machine, onClose, onChanged }) {
 
         {msg && <p className="muted mt">{msg}</p>}
         {err && <p className="error mt">{err}</p>}
+
+        <div className="row spread mt">
+          <button type="button" className="btn ghost" onClick={onClose}>Đóng</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EnrollmentSecretsModal({ onClose }) {
+  const [secrets, setSecrets] = useState([]);
+  const [adOu, setAdOu] = useState("");
+  const [expiresInHours, setExpiresInHours] = useState("48");
+  const [maxUses, setMaxUses] = useState("");
+  const [note, setNote] = useState("");
+  const [newSecret, setNewSecret] = useState("");
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState("");
+
+  const load = useCallback(() => {
+    api.get("/enrollment-secrets/")
+      .then((d) => setSecrets(d && d.results ? d.results : Array.isArray(d) ? d : []))
+      .catch((e) => setErr(e.message));
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const fmt = (iso) => (iso ? new Date(iso).toLocaleString() : "—");
+
+  const create = async (e) => {
+    e?.preventDefault();
+    if (!adOu.trim() && !confirm(
+      "Để trống OU nghĩa là secret này dùng được cho MỌI máy trong toàn domain (global), " +
+      "không giới hạn phạm vi. Rủi ro cao hơn nếu bị lộ. Vẫn tiếp tục?"
+    )) return;
+    setBusy("create"); setErr(""); setMsg(""); setNewSecret("");
+    try {
+      const body = { ad_ou: adOu.trim(), note: note.trim() };
+      if (expiresInHours) body.expires_in_hours = expiresInHours;
+      if (maxUses) body.max_uses = maxUses;
+      const r = await api.post("/enrollment-secrets/", body);
+      setNewSecret(r.secret);
+      setMsg("Đã tạo secret mới — chỉ hiển thị MỘT LẦN, hãy sao chép ngay.");
+      setAdOu(""); setNote(""); setMaxUses("");
+      load();
+    } catch (e2) { setErr(e2.message); } finally { setBusy(""); }
+  };
+
+  const revoke = async (secret) => {
+    if (!confirm(`Thu hồi secret ${secret.secret_prefix}… (${secret.ad_ou || "Global"})? Máy chưa enroll bằng secret này sẽ không thể enroll nữa.`)) return;
+    setBusy(`revoke-${secret.id}`); setErr(""); setMsg("");
+    try {
+      const r = await api.post(`/enrollment-secrets/${secret.id}/revoke/`, {});
+      setMsg(r.revoked ? "Đã thu hồi secret." : "Secret này đã bị thu hồi từ trước.");
+      load();
+    } catch (e) { setErr(e.message); } finally { setBusy(""); }
+  };
+
+  return (
+    <div className="modal-bg" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: 640 }}>
+        <h3>Enrollment Secrets — self-enrollment hàng loạt</h3>
+        <p className="muted" style={{ fontSize: 12 }}>
+          Cấp 1 secret dùng chung cho nhiều máy (giới hạn theo OU hoặc để trống = global), publish
+          qua GPO Startup Script (<code>gpo_startup_enroll.ps1</code>) giống hệt cho toàn bộ máy
+          đích — agent tự đổi secret lấy token thật của riêng nó lúc khởi động, không cần cấp
+          token thủ công từng máy.
+        </p>
+
+        <form onSubmit={create}>
+          <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 200px" }}>
+              <label>OU (để trống = global, mọi máy)</label>
+              <input value={adOu} onChange={(e) => setAdOu(e.target.value)}
+                placeholder="OU=Workstations,DC=corp,DC=local" />
+            </div>
+            <div style={{ flex: "0 1 120px" }}>
+              <label>Hạn dùng (giờ)</label>
+              <input type="number" min="1" value={expiresInHours}
+                onChange={(e) => setExpiresInHours(e.target.value)} />
+            </div>
+            <div style={{ flex: "0 1 120px" }}>
+              <label>Số lần dùng tối đa (tùy chọn)</label>
+              <input type="number" min="1" value={maxUses}
+                onChange={(e) => setMaxUses(e.target.value)} placeholder="Không giới hạn" />
+            </div>
+          </div>
+          <label>Ghi chú (tùy chọn)</label>
+          <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="VD: rollout Office 2024 khối kế toán" />
+          {!adOu.trim() && (
+            <p className="muted" style={{ fontSize: 12, color: "var(--warn, #d9a441)" }}>
+              ⚠️ Đang để trống OU — secret sẽ dùng được cho MỌI máy trong domain.
+            </p>
+          )}
+          <div className="row spread mt">
+            <span />
+            <button className="btn" disabled={busy}>
+              {busy === "create" ? "Đang tạo…" : "Tạo secret"}
+            </button>
+          </div>
+        </form>
+
+        {newSecret && (
+          <div className="mt" style={{ background: "var(--panel, #1a1a1a)", padding: 10, borderRadius: 6 }}>
+            <code style={{ wordBreak: "break-all", userSelect: "all" }}>{newSecret}</code>
+          </div>
+        )}
+        {msg && <p className="muted mt">{msg}</p>}
+        {err && <p className="error mt">{err}</p>}
+
+        <hr style={{ margin: "16px 0", border: "none", borderTop: "1px solid var(--border, #333)" }} />
+
+        <table>
+          <thead>
+            <tr>
+              <th>OU</th><th>Secret</th><th>Hết hạn</th><th>Dùng</th><th>Trạng thái</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {secrets.map((s) => (
+              <tr key={s.id}>
+                <td className="muted">{s.ad_ou || "Global"}</td>
+                <td><code>{s.secret_prefix}…</code></td>
+                <td className="muted">{fmt(s.expires_at)}</td>
+                <td className="muted">{s.use_count}{s.max_uses ? ` / ${s.max_uses}` : ""}</td>
+                <td>
+                  <span className={`badge ${s.is_active ? "info" : "default"}`}>
+                    {s.is_active ? "Đang hoạt động" : s.revoked_at ? "Đã thu hồi" : "Hết hạn"}
+                  </span>
+                </td>
+                <td>
+                  {s.is_active && (
+                    <button className="btn ghost" style={{ padding: "4px 10px" }}
+                      onClick={() => revoke(s)} disabled={busy}>
+                      {busy === `revoke-${s.id}` ? "Đang thu hồi…" : "Thu hồi"}
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {secrets.length === 0 && <tr><td colSpan="6" className="muted">Chưa có secret nào.</td></tr>}
+          </tbody>
+        </table>
 
         <div className="row spread mt">
           <button type="button" className="btn ghost" onClick={onClose}>Đóng</button>

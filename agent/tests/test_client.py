@@ -122,3 +122,26 @@ def test_verify_tls_passed_through():
     client.poll_job()
     _, _, kwargs = session.calls[0]
     assert kwargs["verify"] is False
+
+
+# ---------------- self-enrollment: enroll() không kèm Authorization ----------------
+
+
+def test_no_bearer_header_when_no_token():
+    session = FakeSession(response=FakeResponse())
+    AgentClient(_config(token="", enrollment_secret="shared-secret"), session=session)
+    assert "Authorization" not in session.headers
+
+
+def test_enroll_posts_without_auth_header():
+    session = FakeSession(response=FakeResponse(json_data={"token": "new-real-token"}))
+    client = AgentClient(_config(token="", enrollment_secret="shared-secret"), session=session)
+
+    result = client.enroll("shared-secret", "PC-01")
+
+    assert result == "new-real-token"
+    assert "Authorization" not in session.headers
+    method, url, kwargs = session.calls[0]
+    assert method == "POST"
+    assert url == "https://ryandeploy.example.com/api/agent/enroll/"
+    assert kwargs["json"] == {"secret": "shared-secret", "hostname": "PC-01"}

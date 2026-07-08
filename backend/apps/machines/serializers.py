@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from apps.agents.models import EnrollmentSecret
+
 from .models import ADConfig, Machine, MachineGroup
 
 
@@ -46,6 +48,31 @@ class MachineDetailSerializer(MachineSerializer):
             "revoked_at": token.revoked_at,
             "is_active": token.is_active,
         }
+
+
+class EnrollmentSecretSerializer(serializers.ModelSerializer):
+    """Read-only — tạo/thu hồi secret đi qua action riêng (EnrollmentSecretViewSet), không qua
+    serializer này, vì cần trả raw secret 1 lần và validate expires_in_hours."""
+
+    is_active = serializers.BooleanField(read_only=True)
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True, default=None)
+
+    class Meta:
+        model = EnrollmentSecret
+        fields = [
+            "id",
+            "ad_ou",
+            "secret_prefix",
+            "expires_at",
+            "max_uses",
+            "use_count",
+            "revoked_at",
+            "is_active",
+            "note",
+            "created_at",
+            "created_by_username",
+        ]
+        read_only_fields = fields
 
 
 class ADConfigSerializer(serializers.ModelSerializer):

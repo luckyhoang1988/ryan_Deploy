@@ -1,6 +1,8 @@
+import threading
+
 import pytest
 
-from ryandeploy_agent.config import ConfigError, load_config
+from ryandeploy_agent.config import ConfigError, load_config, persist_token, wait_for_config
 
 
 def _write(tmp_path, content: str) -> str:
@@ -80,3 +82,109 @@ def test_build_url_strips_trailing_slash(tmp_path):
     )
     config = load_config(path)
     assert config.build_url("/api/agent/heartbeat/") == "https://ryandeploy.example.com/api/agent/heartbeat/"
+
+
+# ---------------- self-enrollment: enrollment_secret / needs_enrollment / persist_token ----------------
+
+
+def test_missing_both_token_and_secret_raises(tmp_path):
+    path = _write(tmp_path, "[agent]\nserver_url = https://ryandeploy.example.com\n")
+    with pytest.raises(ConfigError, match="enrollment_secret"):
+        load_config(path)
+
+
+def test_enrollment_secret_without_token_loads_and_needs_enrollment(tmp_path):
+    path = _write(
+        tmp_path,
+        "[agent]\nserver_url = https://ryandeploy.example.com\nenrollment_secret = shared-secret\n",
+    )
+    config = load_config(path)
+    assert config.token == ""
+    assert config.enrollment_secret == "shared-secret"
+    assert config.needs_enrollment is True
+
+
+def test_config_with_real_token_does_not_need_enrollment(tmp_path):
+    path = _write(
+        tmp_path,
+        "[agent]\nserver_url = https://ryandeploy.example.com\ntoken = abc123\n"
+        "enrollment_secret = leftover-secret\n",
+    )
+    config = load_config(path)
+    # Đã có token thật (đã enroll trước đó) -> không cần enroll lại dù enrollment_secret
+    # vẫn còn sót trong file (chưa kịp bị persist_token dọn ở lần trước).
+    assert config.needs_enrollment is False
+
+
+def test_persist_token_writes_token_and_removes_secret(tmp_path):
+    path = _write(
+        tmp_path,
+        "[agent]\nserver_url = https://ryandeploy.example.com\nenrollment_secret = shared-secret\n"
+        "poll_interval = 5\n",
+    )
+    persist_token(path, "real-token-abc")
+
+    config = load_config(path)
+    assert config.token == "real-token-abc"
+    assert config.enrollment_secret == ""
+    assert config.needs_enrollment is False
+    assert config.poll_interval == 5  # các field khác không bị mất khi ghi lại file
+
+
+# ---------------- wait_for_config: chờ agent.ini xuất hiện thay vì thoát service ----------------
+
+
+def test_wait_for_config_returns_immediately_when_file_already_valid(tmp_path):
+    path = _write(tmp_path, "[agent]\nserver_url = https://ryandeploy.example.com\ntoken = abc123\n")
+    config = wait_for_config(path, threading.Event())
+    assert config is not None
+    assert config.token == "abc123"
+
+
+def test_wait_for_config_retries_until_file_appears(tmp_path, monkeypatch):
+    import ryandeploy_agent.config as config_module
+
+    monkeypatch.setattr(config_module, "_CONFIG_INITIAL_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(config_module, "_CONFIG_MAX_BACKOFF_SECONDS", 0)
+    path = str(tmp_path / "agent.ini")  # chưa tồn tại — mô phỏng lúc MSI vừa cài xong
+    stop_event = threading.Event()
+
+    def write_file_after_first_check():
+        # Lần load_config() đầu tiên chắc chắn thất bại (file chưa có); mô phỏng GPO/admin
+        # ghi file trong lúc service đang retry bằng cách ghi ngay khi wait() được gọi lần đầu.
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("[agent]\nserver_url = https://ryandeploy.example.com\ntoken = abc123\n")
+
+    original_wait = stop_event.wait
+
+    def fake_wait(timeout=None):
+        write_file_after_first_check()
+        return original_wait(0)
+
+    stop_event.wait = fake_wait
+
+    result = wait_for_config(path, stop_event)
+
+    assert result is not None
+    assert result.token == "abc123"
+
+
+def test_wait_for_config_returns_none_when_stopped_while_waiting(tmp_path, monkeypatch):
+    import ryandeploy_agent.config as config_module
+
+    monkeypatch.setattr(config_module, "_CONFIG_INITIAL_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(config_module, "_CONFIG_MAX_BACKOFF_SECONDS", 0)
+    path = str(tmp_path / "does_not_exist.ini")
+    stop_event = threading.Event()
+
+    original_wait = stop_event.wait
+
+    def fake_wait(timeout=None):
+        stop_event.set()  # service bị dừng đúng lúc đang chờ cấu hình
+        return original_wait(0)
+
+    stop_event.wait = fake_wait
+
+    result = wait_for_config(path, stop_event)
+
+    assert result is None

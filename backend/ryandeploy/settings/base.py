@@ -143,6 +143,8 @@ REST_FRAMEWORK = {
         "agent_heartbeat": "6/min",
         "agent_report": "20/min",
         "agent_download": "10/min",
+        # Throttle theo IP (máy chưa có token) — chống brute-force dò enrollment secret.
+        "agent_enroll": "10/min",
     },
 }
 

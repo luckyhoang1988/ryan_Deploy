@@ -1,14 +1,18 @@
 import csv
 import io
+from datetime import timedelta
 
 from django.db.models import ProtectedError
 from django.http import HttpResponse
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.agents.services import issue_token, revoke_token
+from apps.agents.models import EnrollmentSecret
+from apps.agents.services import issue_enrollment_secret, issue_token, revoke_enrollment_secret, revoke_token
 from apps.audit.models import AuditLog
 from apps.core.permissions import IsAdmin, IsViewerOrAbove
 from apps.core.task_registry import remember_task_owner
@@ -17,6 +21,7 @@ from .ad_sync import test_ad_connection
 from .models import ADConfig, ConnectionMode, Machine, MachineGroup
 from .serializers import (
     ADConfigSerializer,
+    EnrollmentSecretSerializer,
     MachineDetailSerializer,
     MachineGroupSerializer,
     MachineSerializer,
@@ -235,6 +240,75 @@ class MachineGroupViewSet(viewsets.ModelViewSet):
     # Nhóm máy quyết định target của deployment → cùng cấp Tier-0 như Machine: mọi user
     # đọc được (để chọn target), chỉ admin tạo/sửa/xóa.
     permission_classes = [IsAdmin]
+
+
+class EnrollmentSecretViewSet(viewsets.ModelViewSet):
+    """
+    Quản lý secret dùng chung cho self-enrollment hàng loạt (thay thế cấp token thủ công
+    từng máy khi rollout ~1000 PC). Bất biến sau khi tạo — chỉ list/retrieve/create/revoke,
+    không update.
+    """
+
+    queryset = EnrollmentSecret.objects.select_related("created_by").all()
+    serializer_class = EnrollmentSecretSerializer
+    permission_classes = [IsAdmin]
+    http_method_names = ["get", "post", "head", "options"]
+
+    def create(self, request, *args, **kwargs):
+        ad_ou = (request.data.get("ad_ou") or "").strip()
+        note = (request.data.get("note") or "").strip()
+
+        expires_at = request.data.get("expires_at")
+        expires_in_hours = request.data.get("expires_in_hours")
+        if expires_at:
+            expires_at = parse_datetime(str(expires_at))
+            if expires_at is None:
+                return Response({"detail": "expires_at không hợp lệ (ISO 8601)."}, status=status.HTTP_400_BAD_REQUEST)
+        elif expires_in_hours:
+            try:
+                hours = float(expires_in_hours)
+                if hours <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return Response({"detail": "expires_in_hours phải là số dương."}, status=status.HTTP_400_BAD_REQUEST)
+            expires_at = timezone.now() + timedelta(hours=hours)
+        else:
+            return Response(
+                {"detail": "Cần truyền expires_at hoặc expires_in_hours."}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        max_uses = request.data.get("max_uses") or None
+        if max_uses is not None:
+            try:
+                max_uses = int(max_uses)
+                if max_uses <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "max_uses phải là số nguyên dương."}, status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        raw, secret = issue_enrollment_secret(
+            ad_ou, expires_at, max_uses=max_uses, user=request.user, note=note,
+        )
+        AuditLog.record(
+            AuditLog.Action.AGENT_ENROLLMENT_SECRET_CREATE, user=request.user,
+            ad_ou=ad_ou or "global", expires_at=expires_at.isoformat(), max_uses=max_uses,
+        )
+        data = EnrollmentSecretSerializer(secret).data
+        data["secret"] = raw
+        return Response(data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"])
+    def revoke(self, request, pk=None):
+        secret = self.get_object()
+        revoked = revoke_enrollment_secret(secret)
+        if revoked:
+            AuditLog.record(
+                AuditLog.Action.AGENT_ENROLLMENT_SECRET_REVOKE, user=request.user,
+                ad_ou=secret.ad_ou or "global", secret_prefix=secret.secret_prefix,
+            )
+        return Response({"revoked": revoked})
 
 
 class ADConfigView(APIView):

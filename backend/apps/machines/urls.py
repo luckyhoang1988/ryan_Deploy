@@ -4,6 +4,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     ADConfigTestView,
     ADConfigView,
+    EnrollmentSecretViewSet,
     MachineGroupViewSet,
     MachineViewSet,
 )
@@ -11,6 +12,7 @@ from .views import (
 router = DefaultRouter()
 router.register("machines", MachineViewSet, basename="machine")
 router.register("machine-groups", MachineGroupViewSet, basename="machinegroup")
+router.register("enrollment-secrets", EnrollmentSecretViewSet, basename="enrollmentsecret")
 
 urlpatterns = [
     path("ad-config/", ADConfigView.as_view(), name="ad-config"),

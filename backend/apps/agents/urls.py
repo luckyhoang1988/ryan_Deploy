@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .views import (
+    AgentEnrollView,
     AgentHeartbeatView,
     AgentJobPollView,
     AgentJobReportView,
@@ -14,4 +15,5 @@ urlpatterns = [
     path("packages/<int:version_id>/download/", AgentPackageDownloadView.as_view(), name="agent-package-download"),
     path("scripts/<str:name>/", AgentScriptView.as_view(), name="agent-script"),
     path("heartbeat/", AgentHeartbeatView.as_view(), name="agent-heartbeat"),
+    path("enroll/", AgentEnrollView.as_view(), name="agent-enroll"),
 ]

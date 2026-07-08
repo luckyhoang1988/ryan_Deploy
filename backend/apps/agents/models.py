@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 from apps.core.models import TimeStampedModel
 
@@ -44,3 +45,46 @@ class AgentToken(TimeStampedModel):
     @property
     def is_active(self) -> bool:
         return self.revoked_at is None
+
+
+class EnrollmentSecret(TimeStampedModel):
+    """
+    Secret dùng CHUNG cho self-enrollment hàng loạt — khác AgentToken (1 token/máy). Máy tự
+    đổi secret này lấy 1 AgentToken thật của riêng nó qua enroll_machine() (services.py), nên
+    bản thân secret không cấp quyền poll job. Lưu hash một chiều, giống AgentToken.token_hash.
+    """
+
+    ad_ou = models.CharField(
+        max_length=512, blank=True,
+        help_text="Giới hạn theo OU (khớp DN từ AD sync). Để trống = global — dùng được cho mọi máy.",
+    )
+    secret_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    secret_prefix = models.CharField(
+        max_length=8, blank=True, help_text="Phần đầu secret (không bí mật) để admin nhận diện trong UI/audit",
+    )
+    expires_at = models.DateTimeField(help_text="Bắt buộc — secret dùng chung phải có hạn ngắn.")
+    max_uses = models.PositiveIntegerField(null=True, blank=True)
+    use_count = models.PositiveIntegerField(default=0)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL,
+    )
+    note = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        verbose_name = "Enrollment secret"
+        verbose_name_plural = "Enrollment secrets"
+        indexes = [models.Index(fields=["ad_ou"])]
+
+    def __str__(self):
+        return f"EnrollmentSecret({self.ad_ou or 'global'}, {self.secret_prefix}…)"
+
+    @property
+    def is_active(self) -> bool:
+        if self.revoked_at is not None:
+            return False
+        if timezone.now() >= self.expires_at:
+            return False
+        if self.max_uses is not None and self.use_count >= self.max_uses:
+            return False
+        return True

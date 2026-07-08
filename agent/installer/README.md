@@ -33,7 +33,55 @@ Service (`RyanDeployAgent`, LocalSystem, tự khởi động cùng máy).
 3. Máy trong OU cần **reboot** để nhận cài đặt lần đầu (Computer Software Installation chỉ áp
    dụng lúc khởi động máy, không áp dụng lúc `gpupdate` thông thường).
 
-## 3. Cấp token + rải qua GPO Startup Script
+## 3. Cấp quyền hàng loạt: Self-enrollment theo OU (khuyến nghị cho rollout ≥ 50-100 máy)
+
+Thay vì cấp 1000 token riêng cho 1000 máy (Phương án B bên dưới), tạo **đúng 1 "enrollment
+secret"** dùng chung cho cả OU (hoặc toàn domain), publish **cùng một script/tham số** cho mọi
+máy đích — agent tự gọi `/api/agent/enroll/` lúc khởi động lần đầu để đổi secret lấy token thật
+của riêng nó, ghi vào `agent.ini` cục bộ, rồi hoạt động như bình thường. Từ góc nhìn admin:
+1000 máy → 1 thao tác tạo secret, 0 thao tác cấp/rải token thủ công.
+
+1. Tạo enrollment secret (qua UI trang Machines → "Enrollment Secrets", hoặc API trực tiếp):
+   ```
+   POST /api/enrollment-secrets/
+   Body: {"ad_ou": "OU=ZP,DC=corp,DC=local", "expires_in_hours": 48}
+   ```
+   Để trống `ad_ou` = secret **global** (mọi OU) — tiện cho rollout toàn công ty 1 lần, đổi lại
+   rủi ro cao hơn nếu lộ (bất kỳ máy nào biết secret cũng enroll được). `expires_at`/
+   `expires_in_hours` là bắt buộc — đặt sát với thời gian rollout thực tế thay vì để hạn dài.
+   `max_uses` (optional) giới hạn thêm số lần dùng nếu biết trước số máy trong đợt.
+   Response trả về secret dạng plaintext **đúng 1 lần duy nhất** — lưu lại ngay, không xem lại
+   được sau đó (giống `provision_agent_token`).
+
+2. Copy `gpo_startup_enroll.ps1` vào thư mục script Startup của GPO (Group Policy Management →
+   GPO → Edit → **Computer Configuration → Policies → Windows Settings → Scripts → Startup** →
+   PowerShell Scripts → Add), Script Parameters — **giống hệt cho mọi máy trong OU/domain**,
+   không cần tra `%COMPUTERNAME%` hay build CSV:
+   ```
+   -ServerUrl "https://ryandeploy.corp.local" -EnrollmentSecret "<secret-vua-tao>"
+   ```
+
+3. Máy trong OU boot lên: script ghi `server_url` + `enrollment_secret` vào `agent.ini`, (re)start
+   service `RyanDeployAgent` → service gọi `/api/agent/enroll/`, nhận token thật, tự ghi đè
+   `agent.ini` (xóa `enrollment_secret`, thêm `token`) qua `ryandeploy_agent/enrollment.py`. Nếu
+   máy chưa tồn tại trong hệ thống (chưa sync AD) hoặc server tạm unreachable, agent tự retry với
+   backoff (tối đa 300s) tới khi thành công hoặc service bị dừng.
+
+   ⚠️ **Guard bắt buộc đã có sẵn trong script**: nếu `agent.ini` ĐÃ có `token` thật (máy đã enroll
+   từ lần boot trước), script bỏ qua hoàn toàn, KHÔNG ghi đè — vì Startup Script chạy MỌI lần
+   boot, ghi đè sẽ xóa token thật, đẩy máy về pending-enrollment, và enroll lại sẽ bị server từ
+   chối vĩnh viễn ("máy đã có token agent đang hoạt động") cho tới khi admin revoke thủ công.
+
+4. Theo dõi rollout qua `use_count`/`last_used_at` của secret (trang "Enrollment Secrets") và
+   `AgentToken.last_used_at` của từng máy (machine detail — xem thêm mục "4. Xác nhận rollout"
+   bên dưới, áp dụng chung cho cả hai phương án). Khi các máy trong OU đã enroll và poll thành
+   công, **thu hồi (revoke) secret** để đóng cửa sổ có thể enroll thêm bằng secret đó (secret
+   cũng tự hết hạn theo `expires_at` nếu quên revoke).
+
+### Phương án B: Token per-machine qua CSV (case cần siết chặt hơn, hoặc máy ngoài AD)
+
+Dùng khi cần kiểm soát chặt từng máy (mỗi token gắn cứng 1 hostname, không có cửa sổ dùng chung),
+hoặc re-enroll một máy đã bị revoke (secret dùng chung không áp dụng được cho máy đã có token).
 
 1. Cấp token hàng loạt cho các máy trong OU (admin, qua UI hoặc API trực tiếp):
    ```
@@ -105,3 +153,9 @@ trước Startup Scripts, nên lần cài đầu service có thể khởi độn
   sinh ra đã được xác nhận đọc đúng bằng `ryandeploy_agent.config.load_config` thật) — riêng
   nhánh (Re)start service chưa test được vì máy dev không có service `RyanDeployAgent` cài
   sẵn (nhánh "service chưa cài — bỏ qua" đã test; nhánh restart/start thật cần máy đã cài MSI).
+- `gpo_startup_enroll.ps1` đã test thật bằng PowerShell: ghi đúng `[agent]` với `enrollment_secret`
+  khi `agent.ini` chưa tồn tại, idempotent khi chạy lại với secret không đổi, và **guard quan
+  trọng nhất** (agent.ini đã có `token` thật → bỏ qua hoàn toàn, không ghi đè) đã xác nhận hoạt
+  động đúng. File `.ps1` phải lưu **UTF-8 có BOM** (giống file `_provision_token.ps1` cũ) — nếu
+  không, Windows PowerShell 5.1 đọc sai codepage phần comment tiếng Việt và báo lỗi parse ("string
+  missing terminator"). Nhánh (Re)start service có cùng giới hạn test như script cũ ở trên.

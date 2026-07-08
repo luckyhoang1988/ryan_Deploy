@@ -16,7 +16,8 @@ import win32event
 import win32service
 import win32serviceutil
 
-from .config import DEFAULT_CONFIG_PATH, load_config
+from .config import DEFAULT_CONFIG_PATH, wait_for_config
+from .enrollment import ensure_enrolled
 from .poll_loop import PollLoop
 
 _LOG_DIR = r"C:\ProgramData\RyanDeployAgent\logs"
@@ -44,20 +45,36 @@ class RyanDeployAgentService(win32serviceutil.ServiceFramework):
         self._stop_event = threading.Event()
 
     def SvcDoRun(self):
-        _configure_logging()
-        servicemanager.LogInfoMsg("RyanDeployAgent: đang khởi động...")
         try:
-            config = load_config(DEFAULT_CONFIG_PATH)
-        except Exception as e:  # noqa: BLE001
-            servicemanager.LogErrorMsg(f"RyanDeployAgent: lỗi cấu hình, dừng service: {e}")
-            self.ReportServiceStatus(win32service.SERVICE_STOPPED)
-            return
+            _configure_logging()
+            logger = logging.getLogger("ryandeploy_agent.service")
+            logger.info("RyanDeployAgent: đang khởi động...")
+            servicemanager.LogInfoMsg("RyanDeployAgent: đang khởi động...")
+            config = wait_for_config(DEFAULT_CONFIG_PATH, self._stop_event)
+            if config is None:
+                logger.info("RyanDeployAgent: dừng khi service stop trong lúc chờ cấu hình.")
+                servicemanager.LogInfoMsg("RyanDeployAgent: dừng khi service stop trong lúc chờ cấu hình.")
+                self.ReportServiceStatus(win32service.SERVICE_STOPPED)
+                return
 
-        loop = PollLoop(config, self._stop_event)
-        thread = threading.Thread(target=loop.run_forever, name="ryandeploy-poll-loop", daemon=True)
-        thread.start()
-        servicemanager.LogInfoMsg("RyanDeployAgent: đã khởi động.")
-        win32event.WaitForSingleObject(self._stop_event_win, win32event.INFINITE)
+            config = ensure_enrolled(config, DEFAULT_CONFIG_PATH, self._stop_event)
+            if config.needs_enrollment:
+                logger.info("RyanDeployAgent: dừng khi service stop trong lúc chờ enroll.")
+                servicemanager.LogInfoMsg("RyanDeployAgent: dừng khi service stop trong lúc chờ enroll.")
+                self.ReportServiceStatus(win32service.SERVICE_STOPPED)
+                return
+
+            loop = PollLoop(config, self._stop_event)
+            thread = threading.Thread(target=loop.run_forever, name="ryandeploy-poll-loop", daemon=True)
+            thread.start()
+            logger.info("RyanDeployAgent: đã khởi động.")
+            servicemanager.LogInfoMsg("RyanDeployAgent: đã khởi động.")
+            win32event.WaitForSingleObject(self._stop_event_win, win32event.INFINITE)
+        except Exception as e:  # noqa: BLE001
+            logger = logging.getLogger("ryandeploy_agent.service")
+            logger.error(f"RyanDeployAgent: exception không xác định, dừng service: {e}", exc_info=True)
+            servicemanager.LogErrorMsg(f"RyanDeployAgent: exception không xác định: {e}")
+            raise
 
     def SvcStop(self):
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
