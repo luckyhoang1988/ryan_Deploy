@@ -1,13 +1,13 @@
-"""Celery tasks cho machines: đồng bộ AD và kiểm tra online định kỳ."""
+"""Celery tasks cho machines: đồng bộ AD và dọn is_online quá hạn (agent ngừng heartbeat)."""
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 
 from celery import shared_task
 from django.conf import settings
-from django.db import connections
+from django.db.models import Q
+from django.utils import timezone
 
 from .ad_sync import sync_computers_from_ad
-from .connectivity import refresh_machine_status
 from .models import Machine
 
 logger = logging.getLogger("apps.machines")
@@ -33,26 +33,19 @@ def sync_from_ad(search_ou: str | None = None, user_id: int | None = None, purge
     return data
 
 
-def _refresh_and_close(machine) -> bool:
-    """Refresh 1 máy rồi đóng kết nối DB thread-local — luồng của ThreadPoolExecutor
-    nằm ngoài vòng đời Celery task nên Django không tự đóng connection cho chúng."""
-    try:
-        return refresh_machine_status(machine)
-    finally:
-        connections.close_all()
-
-
-@shared_task(name="apps.machines.tasks.check_all_online")
-def check_all_online():
-    """Kiểm tra song song trạng thái online của mọi máy enabled."""
-    machines = list(Machine.objects.filter(enabled=True))
-    if not machines:
-        return {"checked": 0, "online": 0}
-
-    max_workers = max(1, settings.RYANDEPLOY.get("MACHINE_ONLINE_SCAN_WORKERS", 64))
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        results = list(pool.map(_refresh_and_close, machines))
-
-    online = sum(1 for r in results if r)
-    logger.info("Online check: %s/%s máy online", online, len(machines))
-    return {"checked": len(machines), "online": online}
+@shared_task(name="apps.machines.tasks.mark_stale_machines_offline")
+def mark_stale_machines_offline():
+    """
+    Agent là nguồn duy nhất xác định is_online (không còn port/ping scan) — nhưng
+    AgentHeartbeatView chỉ set is_online=True, không tự set lại False khi agent ngừng
+    heartbeat (tắt máy, service dừng, mất mạng). Task này đóng vai trò "phát hiện offline":
+    máy đang is_online=True mà last_seen quá hạn (không heartbeat kịp) thì tự chuyển False.
+    """
+    threshold = settings.RYANDEPLOY.get("AGENT_OFFLINE_THRESHOLD", 900)
+    cutoff = timezone.now() - timedelta(seconds=threshold)
+    updated = Machine.objects.filter(is_online=True).filter(
+        Q(last_seen__lt=cutoff) | Q(last_seen__isnull=True)
+    ).update(is_online=False)
+    if updated:
+        logger.info("Đã đánh offline %s máy quá hạn heartbeat (> %ss)", updated, threshold)
+    return {"marked_offline": updated}

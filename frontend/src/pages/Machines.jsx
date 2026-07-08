@@ -95,19 +95,6 @@ export default function Machines() {
     } catch (e) { setErr(e.message); } finally { setBusy(""); }
   };
 
-  const checkOnline = async () => {
-    setBusy("online"); setErr(""); setMsg("");
-    try {
-      const { task_id } = await api.post("/machines/check_online/", {});
-      const t = await waitForTask(task_id);
-      if (t.state === "FAILURE") { setErr(`Online check: ${t.error}`); return; }
-      const r = t.result || {};
-      setMsg(`Online check: ${r.online}/${r.checked} máy online`);
-      load(page);
-      loadStats();
-    } catch (e) { setErr(e.message); } finally { setBusy(""); }
-  };
-
   const exportCSV = () => {
     const params = new URLSearchParams();
     if (search.trim()) params.set("search", search.trim());
@@ -137,9 +124,6 @@ export default function Machines() {
               {busy === "purge" ? "Đang xóa…" : "Xóa tất cả máy"}
             </button>
           )}
-          <button className="btn ghost" onClick={checkOnline} disabled={busy}>
-            {busy === "online" ? "Đang kiểm tra…" : "Kiểm tra online"}
-          </button>
         </div>
       </div>
 

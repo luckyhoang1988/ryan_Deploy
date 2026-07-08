@@ -21,7 +21,7 @@ from .serializers import (
     MachineGroupSerializer,
     MachineSerializer,
 )
-from .tasks import check_all_online, sync_from_ad
+from .tasks import sync_from_ad
 
 
 class MachineViewSet(viewsets.ModelViewSet):
@@ -32,8 +32,8 @@ class MachineViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdmin]
 
     def get_permissions(self):
-        # check_online, stats, export chỉ đọc → operator cũng được.
-        if self.action in ("check_online", "stats", "export"):
+        # stats, export chỉ đọc → operator cũng được.
+        if self.action in ("stats", "export"):
             return [IsViewerOrAbove()]
         return super().get_permissions()
 
@@ -64,8 +64,8 @@ class MachineViewSet(viewsets.ModelViewSet):
         return self._apply_filters(super().get_queryset())
 
     def perform_update(self, serializer):
-        # Máy bị disable không còn được check_all_online refresh → is_online cũ sẽ
-        # đứng hình mãi mãi và làm sai lệch thống kê online/offline. Xóa ngay lúc tắt.
+        # Máy bị disable không còn agent heartbeat/mark_stale_machines_offline nào chạm tới
+        # → is_online cũ sẽ đứng hình mãi mãi, sai lệch thống kê online/offline. Xóa ngay lúc tắt.
         was_enabled = serializer.instance.enabled
         serializer.save()
         if was_enabled and not serializer.instance.enabled:
@@ -114,16 +114,6 @@ class MachineViewSet(viewsets.ModelViewSet):
             )
         return Response(
             {"detail": f"Đã xóa {count} máy.", "deleted": count},
-        )
-
-    @action(detail=False, methods=["post"])
-    def check_online(self, request):
-        """Kiểm tra online toàn bộ máy (chạy nền — ping nhiều máy có thể lâu)."""
-        task = check_all_online.delay()
-        remember_task_owner(task.id, request.user.id)
-        return Response(
-            {"detail": "Đang kiểm tra online (chạy nền).", "task_id": task.id},
-            status=status.HTTP_202_ACCEPTED,
         )
 
     @action(detail=False, methods=["get"])

@@ -113,51 +113,6 @@ def test_sync_ad_dispatches_async_and_audits(admin_client):
     assert AuditLog.objects.filter(action=AuditLog.Action.MACHINE_SYNC).exists()
 
 
-def test_check_online_dispatches_async(admin_client, monkeypatch):
-    # refresh thật sẽ ping/SMB + ghi DB trong ThreadPool → dưới SQLite test bị khóa bảng;
-    # ở đây chỉ kiểm luồng async + endpoint task-status nên thay bằng no-op (không chạm DB).
-    from apps.machines import tasks as m_tasks
-
-    monkeypatch.setattr(m_tasks, "refresh_machine_status", lambda m: False)
-    Machine.objects.create(hostname="PC-ONLINE-1", enabled=True)
-    r = admin_client.post("/api/machines/check_online/", {}, content_type="application/json")
-    assert r.status_code == 202
-    task_id = r.json()["task_id"]
-
-    t = admin_client.get(f"/api/tasks/{task_id}/").json()
-    assert t["ready"] is True
-    assert t["result"]["checked"] == 1
-
-
-def test_check_online_closes_thread_local_db_connections(monkeypatch):
-    # Mỗi luồng của ThreadPoolExecutor nằm ngoài vòng đời Celery task nên Django không
-    # tự đóng connection cho chúng — _refresh_and_close phải tự gọi connections.close_all().
-    from apps.machines import tasks as m_tasks
-
-    calls = []
-    monkeypatch.setattr(m_tasks, "refresh_machine_status", lambda m: calls.append(m) or True)
-    monkeypatch.setattr(m_tasks.connections, "close_all", lambda: calls.append("closed"))
-
-    assert m_tasks._refresh_and_close("fake-machine") is True
-    assert calls == ["fake-machine", "closed"]
-
-
-def test_check_online_closes_connections_even_on_error(monkeypatch):
-    from apps.machines import tasks as m_tasks
-
-    closed = []
-    monkeypatch.setattr(m_tasks.connections, "close_all", lambda: closed.append(True))
-
-    def boom(m):
-        raise RuntimeError("SMB timeout")
-
-    monkeypatch.setattr(m_tasks, "refresh_machine_status", boom)
-
-    with pytest.raises(RuntimeError):
-        m_tasks._refresh_and_close("fake-machine")
-    assert closed == [True]
-
-
 def test_disabling_machine_clears_stale_is_online(admin_client):
     m = Machine.objects.create(hostname="PC-STALE-1", enabled=True, is_online=True)
     r = admin_client.patch(
@@ -167,6 +122,48 @@ def test_disabling_machine_clears_stale_is_online(admin_client):
     m.refresh_from_db()
     assert m.enabled is False
     assert m.is_online is False
+
+
+# ---------------- mark_stale_machines_offline (agent là nguồn duy nhất báo online) ----------------
+
+
+def test_mark_stale_machines_offline_flips_expired_heartbeat(db, settings):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from apps.machines.tasks import mark_stale_machines_offline
+
+    settings.RYANDEPLOY = {**settings.RYANDEPLOY, "AGENT_OFFLINE_THRESHOLD": 900}
+    stale = Machine.objects.create(
+        hostname="PC-STALE-AGENT", enabled=True, is_online=True,
+        last_seen=timezone.now() - timedelta(seconds=901),
+    )
+    fresh = Machine.objects.create(
+        hostname="PC-FRESH-AGENT", enabled=True, is_online=True,
+        last_seen=timezone.now() - timedelta(seconds=10),
+    )
+    never_seen = Machine.objects.create(hostname="PC-NEVER-SEEN", enabled=True, is_online=True)
+
+    result = mark_stale_machines_offline()
+
+    assert result == {"marked_offline": 2}
+    stale.refresh_from_db()
+    fresh.refresh_from_db()
+    never_seen.refresh_from_db()
+    assert stale.is_online is False
+    assert fresh.is_online is True
+    assert never_seen.is_online is False
+
+
+def test_mark_stale_machines_offline_ignores_already_offline(db, settings):
+    from apps.machines.tasks import mark_stale_machines_offline
+
+    Machine.objects.create(hostname="PC-ALREADY-OFF", enabled=True, is_online=False)
+
+    result = mark_stale_machines_offline()
+
+    assert result == {"marked_offline": 0}
 
 
 def test_updating_other_field_does_not_touch_is_online(admin_client):

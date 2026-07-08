@@ -203,15 +203,15 @@ RYANDEPLOY = {
     # --- Catalog / Auto Download ---
     # Timeout (giây) khi tải installer từ URL ngoài (downloader.py).
     "DOWNLOAD_TIMEOUT": env_int("RYANDEPLOY_DOWNLOAD_TIMEOUT", 300),
-    # --- Machine online-check ---
-    # Số luồng song song khi quét is_online toàn bộ máy enabled (xem apps.machines.tasks).
-    # Mặc định 64 (tăng từ 32 hardcode cũ) vì mỗi máy giờ có thể tốn tới ~5.5s worst-case
-    # (ping + TCP 135 + TCP 445) thay vì chỉ 1 TCP check trước đây.
-    "MACHINE_ONLINE_SCAN_WORKERS": env_int("RYANDEPLOY_MACHINE_ONLINE_SCAN_WORKERS", 64),
     # --- Agent (chế độ outbound HTTPS, song song SMB) ---
     # Job của máy connection_mode=agent ở QUEUED quá lâu mà agent chưa từng poll tới (agent
     # offline/chưa cài) -> tự đánh FAILED thay vì kẹt vô thời hạn (xem reconcile_stuck_deployments).
     "AGENT_JOB_QUEUE_TIMEOUT": env_int("RYANDEPLOY_AGENT_JOB_QUEUE_TIMEOUT", 3600),
+    # Máy đang is_online=True mà quá thời gian này không có heartbeat mới -> tự đánh False
+    # (xem apps.machines.tasks.mark_stale_machines_offline). Mặc định 900s = 3 lần
+    # heartbeat_interval mặc định của agent (300s, xem agent/ryandeploy_agent/config.py) để
+    # chịu được vài lần heartbeat lỡ nhịp trước khi coi là mất kết nối thật.
+    "AGENT_OFFLINE_THRESHOLD": env_int("RYANDEPLOY_AGENT_OFFLINE_THRESHOLD", 900),
 }
 
 # Chặn body form phi-file quá lớn (không áp cho file upload — file đã có trần riêng ở
@@ -231,9 +231,9 @@ AD = {
 from celery.schedules import crontab  # noqa: E402
 
 CELERY_BEAT_SCHEDULE = {
-    "refresh-machine-online-status": {
-        "task": "apps.machines.tasks.check_all_online",
-        "schedule": 900.0,  # mỗi 15 phút
+    "mark-stale-machines-offline": {
+        "task": "apps.machines.tasks.mark_stale_machines_offline",
+        "schedule": 300.0,  # mỗi 5 phút — cùng nhịp heartbeat_interval mặc định của agent
     },
     "nightly-ad-sync": {
         "task": "apps.machines.tasks.sync_from_ad",
