@@ -75,13 +75,24 @@ log vào `C:\ProgramData\RyanDeployAgent\logs\provision.log`, và tự (re)start
 `RyanDeployAgent` sau khi ghi token — xử lý đúng thứ tự GPO thật (Software Installation chạy
 trước Startup Scripts, nên lần cài đầu service có thể khởi động trước khi có `agent.ini`).
 
-## 4. Xác nhận rollout
+## 4. Xác nhận rollout, rồi mới chuyển máy sang nhận job qua agent
 
 - `Machine.agent_version` / `is_online` / `last_seen` cập nhật qua heartbeat — theo dõi trên
   trang Machines.
-- `AgentToken.last_used_at` tăng khi agent poll thành công lần đầu.
-- Nếu cần rollback máy nào về SMB: đổi `connection_mode` của máy về `smb` — không cần gỡ agent
-  ngay (agent không tự nhận job nếu deployment không nhắm connection_mode=agent).
+- `AgentToken.last_used_at` tăng khi agent poll thành công lần đầu. **Lưu ý:** có token hợp lệ
+  và poll được KHÔNG có nghĩa máy đã nhận job — `AgentJobPollView` chỉ trả job cho máy đang ở
+  `connection_mode=agent` (mặc định mọi máy là `smb`). Đây là chốt an toàn cố ý để tách "agent
+  đã cài và liên lạc được" khỏi "máy này đã sẵn sàng nhận job qua agent".
+- Sau khi xác nhận các máy trong OU đã poll thành công (`last_used_at` khác null), chuyển hàng
+  loạt sang `connection_mode=agent`:
+  ```
+  POST /api/machines/bulk-set-connection-mode/
+  Body: {"ad_ou": "OU=ZP,DC=corp,DC=local", "connection_mode": "agent"}
+  ```
+  (hoặc `{"machine_ids": [1,2,3], "connection_mode": "agent"}` cho danh sách cụ thể — dùng cho
+  pilot trước khi mở rộng cả OU). Chỉ từ lúc này máy mới thực sự nhận job qua agent thay vì SMB.
+- Rollback: gọi lại API trên với `connection_mode: "smb"` cho máy/OU cần rollback — không cần
+  gỡ agent ngay (agent không tự nhận job nếu đang ở connection_mode=smb).
 
 ## Giới hạn đã biết
 

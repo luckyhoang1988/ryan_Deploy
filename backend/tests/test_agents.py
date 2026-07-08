@@ -383,3 +383,79 @@ def test_bulk_provision_agent_tokens_by_ad_ou(admin_client, db):
     assert "OU-PC1" in csv_text and "OU-PC2" in csv_text
     assert "OTHER-PC" not in csv_text
     assert AgentToken.objects.filter(machine__in=[m1, m2]).count() == 2
+
+
+def test_bulk_set_connection_mode_by_ad_ou(admin_client, db):
+    m1 = Machine.objects.create(hostname="ZP-PC1", ad_ou="OU=ZP,DC=corp", connection_mode=ConnectionMode.SMB)
+    m2 = Machine.objects.create(hostname="ZP-PC2", ad_ou="OU=ZP,DC=corp", connection_mode=ConnectionMode.SMB)
+    other = Machine.objects.create(hostname="OTHER-PC", ad_ou="OU=Office,DC=corp", connection_mode=ConnectionMode.SMB)
+
+    resp = admin_client.post(
+        "/api/machines/bulk-set-connection-mode/",
+        {"ad_ou": "ZP", "connection_mode": "agent"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"updated": 2, "connection_mode": "agent"}
+
+    m1.refresh_from_db(); m2.refresh_from_db(); other.refresh_from_db()
+    assert m1.connection_mode == ConnectionMode.AGENT
+    assert m2.connection_mode == ConnectionMode.AGENT
+    assert other.connection_mode == ConnectionMode.SMB  # ngoài OU — không đổi
+
+
+def test_bulk_set_connection_mode_by_machine_ids_and_rollback(admin_client, db):
+    m1 = Machine.objects.create(hostname="PILOT-1", connection_mode=ConnectionMode.SMB)
+
+    resp = admin_client.post(
+        "/api/machines/bulk-set-connection-mode/",
+        {"machine_ids": [m1.pk], "connection_mode": "agent"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 200
+    m1.refresh_from_db()
+    assert m1.connection_mode == ConnectionMode.AGENT
+
+    # Rollback về SMB cho đúng máy đó.
+    resp2 = admin_client.post(
+        "/api/machines/bulk-set-connection-mode/",
+        {"machine_ids": [m1.pk], "connection_mode": "smb"},
+        content_type="application/json",
+    )
+    assert resp2.status_code == 200
+    m1.refresh_from_db()
+    assert m1.connection_mode == ConnectionMode.SMB
+
+
+def test_bulk_set_connection_mode_rejects_invalid_mode_and_missing_scope(admin_client, db):
+    Machine.objects.create(hostname="PC-X", connection_mode=ConnectionMode.SMB)
+
+    resp = admin_client.post(
+        "/api/machines/bulk-set-connection-mode/",
+        {"machine_ids": [1], "connection_mode": "bogus"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 400
+
+    resp2 = admin_client.post(
+        "/api/machines/bulk-set-connection-mode/",
+        {"connection_mode": "agent"},
+        content_type="application/json",
+    )
+    assert resp2.status_code == 400
+
+
+def test_bulk_set_connection_mode_requires_admin(admin_client, operator_client, agent_machine):
+    resp_operator = operator_client.post(
+        "/api/machines/bulk-set-connection-mode/",
+        {"machine_ids": [agent_machine.pk], "connection_mode": "smb"},
+        content_type="application/json",
+    )
+    assert resp_operator.status_code == 403
+
+    resp_admin = admin_client.post(
+        "/api/machines/bulk-set-connection-mode/",
+        {"machine_ids": [agent_machine.pk], "connection_mode": "smb"},
+        content_type="application/json",
+    )
+    assert resp_admin.status_code == 200

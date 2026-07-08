@@ -14,7 +14,7 @@ from apps.core.permissions import IsAdmin, IsViewerOrAbove
 from apps.core.task_registry import remember_task_owner
 
 from .ad_sync import test_ad_connection
-from .models import ADConfig, Machine, MachineGroup
+from .models import ADConfig, ConnectionMode, Machine, MachineGroup
 from .serializers import (
     ADConfigSerializer,
     MachineDetailSerializer,
@@ -204,6 +204,39 @@ class MachineViewSet(viewsets.ModelViewSet):
         resp = HttpResponse(buf.getvalue(), content_type="text/csv; charset=utf-8")
         resp["Content-Disposition"] = 'attachment; filename="agent_tokens.csv"'
         return resp
+
+    @action(detail=False, methods=["post"], url_path="bulk-set-connection-mode", permission_classes=[IsAdmin])
+    def bulk_set_connection_mode(self, request):
+        """
+        Đổi connection_mode hàng loạt theo machine_ids hoặc filter ad_ou — dùng khi mở rộng
+        rollout agent theo OU (plan_agent.md §8) sau khi đã xác nhận agent poll thành công qua
+        last_used_at/heartbeat. Không tự cấp token — dùng bulk_provision_agent_tokens riêng.
+        """
+        mode = request.data.get("connection_mode")
+        if mode not in ConnectionMode.values:
+            return Response(
+                {"detail": f"connection_mode phải là một trong: {', '.join(ConnectionMode.values)}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        machine_ids = request.data.get("machine_ids")
+        ad_ou = (request.data.get("ad_ou") or "").strip()
+        qs = Machine.objects.all()
+        if machine_ids:
+            qs = qs.filter(pk__in=machine_ids)
+        elif ad_ou:
+            qs = qs.filter(ad_ou__icontains=ad_ou)
+        else:
+            return Response(
+                {"detail": "Cần truyền machine_ids hoặc ad_ou."}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        updated = qs.update(connection_mode=mode)
+        AuditLog.record(
+            AuditLog.Action.MACHINE_CONNECTION_MODE_UPDATE, user=request.user,
+            connection_mode=mode, count=updated,
+        )
+        return Response({"updated": updated, "connection_mode": mode})
 
 
 class MachineGroupViewSet(viewsets.ModelViewSet):

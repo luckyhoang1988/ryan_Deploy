@@ -29,6 +29,7 @@ class AuditLog(models.Model):
         MACHINE_SYNC = "machine_sync", "Đồng bộ máy từ AD"
         AGENT_TOKEN_ISSUE = "agent_token_issue", "Cấp token agent"
         AGENT_TOKEN_REVOKE = "agent_token_revoke", "Thu hồi token agent"
+        MACHINE_CONNECTION_MODE_UPDATE = "machine_connection_mode_update", "Đổi chế độ kết nối hàng loạt"
         CATALOG_SEED = "catalog_seed", "Nạp Package Library mẫu"
         USER_UPDATE = "user_update", "Sửa user"
         USER_DELETE = "user_delete", "Xóa user"
