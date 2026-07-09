@@ -5,10 +5,17 @@
   Assign (không phải Publish) để MSI tự cài lúc boot dưới SYSTEM, không cần port inbound.
 
   Build: xem build.ps1 trong cùng thư mục (yêu cầu cài WiX Toolset v3.11+,
-  https://wixtoolset.org/releases/).
+  https://wixtoolset.org/releases/, cần extension WixUtilExtension đi kèm bộ cài chuẩn).
 
   Version phải TĂNG mỗi lần build lại để GPO/Windows Installer nhận ra là upgrade
   (UpgradeCode giữ cố định — không đổi giữa các phiên bản).
+
+  Phương án A (đóng cứng server + secret tĩnh, "cài là chạy"): nếu build.ps1 được gọi với
+  -EnrollSecret khác rỗng, MSI tự chạy gpo_startup_enroll.ps1 (đóng gói sẵn trong
+  INSTALLFOLDER\Scripts\) ngay sau khi service được cài/start, tự ghi agent.ini và tự enroll —
+  không cần GPO Startup Script hay thao tác thủ công nào thêm. Nếu ENROLLSECRET rỗng (mặc định),
+  hành vi giữ nguyên như trước: agent.ini phải được rải bằng cách khác (GPO Startup Script theo
+  OU, hoặc ghi tay) trước khi service chạy được.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="*"
@@ -29,17 +36,33 @@
 
     <MediaTemplate EmbedCab="yes" />
 
+    <!--
+      SERVERURL/ENROLLSECRET: đóng cứng lúc build (xem build.ps1 -ServerUrl/-EnrollSecret).
+      ENROLLSECRET rỗng (mặc định) = tắt hoàn toàn CustomAction tự enroll bên dưới, tương thích
+      ngược 100% với các MSI/rollout đang dùng GPO Startup Script hoặc agent.ini thủ công.
+      candle.exe không cho phép Property/@Value="" (lỗi CNDL0006) nên khi EnrollSecret rỗng,
+      KHÔNG khai báo Property ENROLLSECRET luôn — property không tồn tại được MSI coi như "",
+      nên điều kiện ENROLLSECRET &lt;&gt; "" ở InstallExecuteSequence bên dưới vẫn đúng như mong đợi.
+    -->
+    <Property Id="SERVERURL" Value="$(var.ServerUrl)" />
+    <?if $(var.EnrollSecret) != ""?>
+    <Property Id="ENROLLSECRET" Value="$(var.EnrollSecret)" />
+    <?endif?>
+
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
-        <Directory Id="INSTALLFOLDER" Name="RyanDeployAgent" />
+        <Directory Id="INSTALLFOLDER" Name="RyanDeployAgent">
+          <Directory Id="SCRIPTSFOLDER" Name="Scripts" />
+        </Directory>
       </Directory>
     </Directory>
 
     <!--
-      ProgramData\RyanDeployAgent chứa agent.ini (rải bởi GPO Startup Script riêng, xem
-      gpo_startup_provision_token.ps1) và thư mục logs\ — agent tự tạo logs\ lúc chạy
-      (service.py::_configure_logging), ở đây chỉ đảm bảo thư mục gốc tồn tại sẵn từ lúc cài
-      để admin có thể đặt agent.ini thủ công trước khi service chạy lần đầu nếu cần.
+      ProgramData\RyanDeployAgent chứa agent.ini và thư mục logs\ — agent tự tạo logs\ lúc chạy
+      (service.py::_configure_logging). Nếu build có ENROLLSECRET, agent.ini được chính MSI ghi
+      qua CustomAction EnrollAgentCA (xem bên dưới); nếu không, agent.ini phải được rải bằng cách
+      khác (GPO Startup Script theo OU — gpo_startup_enroll.ps1/gpo_startup_provision_token.ps1 —
+      hoặc ghi tay) trước khi service chạy lần đầu.
     -->
     <DirectoryRef Id="TARGETDIR">
       <Directory Id="CommonAppDataFolder">
@@ -50,7 +73,34 @@
     <Feature Id="MainFeature" Title="RyanDeploy Agent" Level="1">
       <ComponentRef Id="AgentExeComponent" />
       <ComponentRef Id="ProgramDataFolderComponent" />
+      <ComponentRef Id="EnrollScriptComponent" />
     </Feature>
+
+    <!--
+      Phương án A: khi ENROLLSECRET được truyền lúc build, tự chạy gpo_startup_enroll.ps1 ngay
+      sau khi service được cài/khởi động — script này đã tự guard (không ghi đè agent.ini nếu đã
+      có token thật) nên an toàn kể cả khi chạy lại lúc repair/upgrade.
+      Dùng pattern CAQuietExec chuẩn của WixUtilExtension (BinaryKey="WixCA") để chạy
+      powershell.exe dưới SYSTEM, deferred, không cần custom binary riêng. CustomActionData được
+      truyền vào CA deferred qua property CÙNG TÊN với Id của chính CA deferred đó (cơ chế chuẩn
+      của Windows Installer để đưa dữ liệu vào ngữ cảnh deferred/no-impersonation) — vì vậy CA
+      "set property" bên dưới phải có Property="EnrollAgentCA", trùng Id của CA deferred.
+    -->
+    <CustomAction Id="SetEnrollAgentCA"
+                  Property="EnrollAgentCA"
+                  Execute="immediate"
+                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[#EnrollScript]&quot; -ServerUrl &quot;[SERVERURL]&quot; -EnrollmentSecret &quot;[ENROLLSECRET]&quot;" />
+    <CustomAction Id="EnrollAgentCA"
+                  BinaryKey="WixCA"
+                  DllEntry="CAQuietExec"
+                  Execute="deferred"
+                  Return="ignore"
+                  Impersonate="no" />
+
+    <InstallExecuteSequence>
+      <Custom Action="SetEnrollAgentCA" After="StartServices">ENROLLSECRET &lt;&gt; ""</Custom>
+      <Custom Action="EnrollAgentCA" After="SetEnrollAgentCA">ENROLLSECRET &lt;&gt; ""</Custom>
+    </InstallExecuteSequence>
 
     <ComponentGroup Id="AgentComponents">
       <Component Id="AgentExeComponent" Directory="INSTALLFOLDER" Guid="FE498277-34EF-4000-9BD5-5646A074B659">
@@ -91,6 +141,18 @@
           rỗng; ở đây cố tình không khai báo RemoveFolder On="uninstall" để tránh mất log/token
           ngoài ý muốn.
         -->
+      </Component>
+
+      <Component Id="EnrollScriptComponent" Directory="SCRIPTSFOLDER" Guid="D2C328AF-865A-4654-B717-2EC36C88C942">
+        <!--
+          Đóng gói nguyên script gpo_startup_enroll.ps1 (đã test kỹ ở Phương án B) để CustomAction
+          EnrollAgentCA tái dùng — không viết lại logic ghi agent.ini/guard token thật bằng tay
+          trong WiX. Luôn cài (kể cả khi ENROLLSECRET rỗng) để đơn giản hoá component/feature;
+          file không dùng tới nếu CustomAction bị điều kiện tắt.
+        -->
+        <File Id="EnrollScript"
+              Source="gpo_startup_enroll.ps1"
+              KeyPath="yes" />
       </Component>
     </ComponentGroup>
   </Product>

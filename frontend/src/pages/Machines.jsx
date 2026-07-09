@@ -84,16 +84,31 @@ export default function Machines() {
     } catch (e) { setErr(e.message); } finally { setBusy(""); }
   };
 
-  const purgeAll = async () => {
-    if (!confirm("Xóa TẤT CẢ máy trong hệ thống? Hành động này không thể hoàn tác.")) return;
+  const purgeAll = async (force = false) => {
+    if (!force && !confirm("Xóa TẤT CẢ máy trong hệ thống? Hành động này không thể hoàn tác.")) return;
     setBusy("purge"); setErr(""); setMsg("");
     try {
-      const r = await api.post("/machines/purge_all/", {});
-      setMsg(`Đã xóa ${r.deleted} máy. Bấm Sync AD để đồng bộ lại.`);
+      const r = await api.post("/machines/purge_all/", force ? { force: true } : {});
+      const extra = r.agent_tokens_destroyed
+        ? ` (đã hủy ${r.agent_tokens_destroyed} token agent — các agent đó phải cài lại/re-enroll)`
+        : "";
+      setMsg(`Đã xóa ${r.deleted} máy${extra}. Bấm Sync AD để đồng bộ lại.`);
       setPage(1);
       load(1);
       loadStats();
-    } catch (e) { setErr(e.message); } finally { setBusy(""); }
+    } catch (e) {
+      // Backend chặn khi còn token agent active (CASCADE sẽ giết agent) — hỏi xác nhận lần 2.
+      if (e.status === 409 && e.data?.requires_force) {
+        if (confirm(
+          `${e.data.detail}\n\nVẫn tiếp tục xóa và hủy ${e.data.agent_tokens_affected} token agent?`
+        )) {
+          await purgeAll(true);
+          return;
+        }
+      } else {
+        setErr(e.message);
+      }
+    } finally { setBusy(""); }
   };
 
   const exportCSV = () => {
@@ -382,6 +397,7 @@ function EnrollmentSecretsModal({ onClose }) {
   const [secrets, setSecrets] = useState([]);
   const [adOu, setAdOu] = useState("");
   const [expiresInHours, setExpiresInHours] = useState("48");
+  const [neverExpires, setNeverExpires] = useState(false);
   const [maxUses, setMaxUses] = useState("");
   const [note, setNote] = useState("");
   const [newSecret, setNewSecret] = useState("");
@@ -405,15 +421,20 @@ function EnrollmentSecretsModal({ onClose }) {
       "Để trống OU nghĩa là secret này dùng được cho MỌI máy trong toàn domain (global), " +
       "không giới hạn phạm vi. Rủi ro cao hơn nếu bị lộ. Vẫn tiếp tục?"
     )) return;
+    if (neverExpires && !confirm(
+      "Secret KHÔNG HẾT HẠN chỉ nên dùng để đóng cứng vào MSI cài đặt (Phương án A trong " +
+      "README). Nó sẽ có hiệu lực vĩnh viễn cho tới khi bạn chủ động thu hồi. Vẫn tiếp tục?"
+    )) return;
     setBusy("create"); setErr(""); setMsg(""); setNewSecret("");
     try {
       const body = { ad_ou: adOu.trim(), note: note.trim() };
-      if (expiresInHours) body.expires_in_hours = expiresInHours;
+      if (neverExpires) body.never_expires = true;
+      else if (expiresInHours) body.expires_in_hours = expiresInHours;
       if (maxUses) body.max_uses = maxUses;
       const r = await api.post("/enrollment-secrets/", body);
       setNewSecret(r.secret);
       setMsg("Đã tạo secret mới — chỉ hiển thị MỘT LẦN, hãy sao chép ngay.");
-      setAdOu(""); setNote(""); setMaxUses("");
+      setAdOu(""); setNote(""); setMaxUses(""); setNeverExpires(false);
       load();
     } catch (e2) { setErr(e2.message); } finally { setBusy(""); }
   };
@@ -448,7 +469,7 @@ function EnrollmentSecretsModal({ onClose }) {
             </div>
             <div style={{ flex: "0 1 120px" }}>
               <label>Hạn dùng (giờ)</label>
-              <input type="number" min="1" value={expiresInHours}
+              <input type="number" min="1" value={expiresInHours} disabled={neverExpires}
                 onChange={(e) => setExpiresInHours(e.target.value)} />
             </div>
             <div style={{ flex: "0 1 120px" }}>
@@ -457,11 +478,21 @@ function EnrollmentSecretsModal({ onClose }) {
                 onChange={(e) => setMaxUses(e.target.value)} placeholder="Không giới hạn" />
             </div>
           </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
+            <input type="checkbox" checked={neverExpires}
+              onChange={(e) => setNeverExpires(e.target.checked)} />
+            Không hết hạn (dùng để đóng cứng vào MSI cài đặt)
+          </label>
           <label>Ghi chú (tùy chọn)</label>
           <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="VD: rollout Office 2024 khối kế toán" />
           {!adOu.trim() && (
             <p className="muted" style={{ fontSize: 12, color: "var(--warn, #d9a441)" }}>
               ⚠️ Đang để trống OU — secret sẽ dùng được cho MỌI máy trong domain.
+            </p>
+          )}
+          {neverExpires && (
+            <p className="muted" style={{ fontSize: 12, color: "var(--warn, #d9a441)" }}>
+              ⚠️ Secret này sẽ không bao giờ tự hết hạn — chỉ mất hiệu lực khi bạn thu hồi thủ công.
             </p>
           )}
           <div className="row spread mt">
@@ -493,7 +524,7 @@ function EnrollmentSecretsModal({ onClose }) {
               <tr key={s.id}>
                 <td className="muted">{s.ad_ou || "Global"}</td>
                 <td><code>{s.secret_prefix}…</code></td>
-                <td className="muted">{fmt(s.expires_at)}</td>
+                <td className="muted">{s.expires_at ? fmt(s.expires_at) : "Không hết hạn"}</td>
                 <td className="muted">{s.use_count}{s.max_uses ? ` / ${s.max_uses}` : ""}</td>
                 <td>
                   <span className={`badge ${s.is_active ? "info" : "default"}`}>

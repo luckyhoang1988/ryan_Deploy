@@ -13,7 +13,15 @@ _DOWNLOAD_CHUNK_SIZE = 1024 * 256
 
 
 class ApiError(Exception):
-    """Lỗi gọi API server (mạng, timeout, hoặc HTTP status lỗi) — caller quyết định retry."""
+    """Lỗi gọi API server (mạng, timeout, hoặc HTTP status lỗi) — caller quyết định retry.
+
+    status_code = HTTP status nếu server có trả lời (>=400); None nếu lỗi mạng/timeout (request
+    chưa tới được server). Dùng để phân biệt 401 (token đã bị xóa/thu hồi trên server → agent
+    phải re-enroll) với lỗi tạm thời (chỉ cần backoff rồi thử lại)."""
+
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class AgentClient:
@@ -64,5 +72,8 @@ class AgentClient:
         except requests.RequestException as e:
             raise ApiError(f"Lỗi kết nối server ({method} {url}): {e}") from e
         if resp.status_code >= 400:
-            raise ApiError(f"Server trả lỗi {resp.status_code} cho {method} {url}: {resp.text[:500]}")
+            raise ApiError(
+                f"Server trả lỗi {resp.status_code} cho {method} {url}: {resp.text[:500]}",
+                status_code=resp.status_code,
+            )
         return resp

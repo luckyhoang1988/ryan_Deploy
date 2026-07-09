@@ -16,7 +16,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     config = load_config(args.config)
     stop_event = threading.Event()
-    loop = PollLoop(config, stop_event)
+    loop = PollLoop(config, stop_event, config_path=args.config)
     try:
         loop.run_forever()
     except KeyboardInterrupt:

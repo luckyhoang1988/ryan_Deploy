@@ -2,7 +2,13 @@ import threading
 
 import pytest
 
-from ryandeploy_agent.config import ConfigError, load_config, persist_token, wait_for_config
+from ryandeploy_agent.config import (
+    ConfigError,
+    clear_token,
+    load_config,
+    persist_token,
+    wait_for_config,
+)
 
 
 def _write(tmp_path, content: str) -> str:
@@ -116,7 +122,7 @@ def test_config_with_real_token_does_not_need_enrollment(tmp_path):
     assert config.needs_enrollment is False
 
 
-def test_persist_token_writes_token_and_removes_secret(tmp_path):
+def test_persist_token_writes_token_and_keeps_secret(tmp_path):
     path = _write(
         tmp_path,
         "[agent]\nserver_url = https://ryandeploy.example.com\nenrollment_secret = shared-secret\n"
@@ -126,9 +132,27 @@ def test_persist_token_writes_token_and_removes_secret(tmp_path):
 
     config = load_config(path)
     assert config.token == "real-token-abc"
-    assert config.enrollment_secret == ""
+    # GIỮ secret để còn tự re-enroll nếu token bị xóa/thu hồi sau này (sự cố purge 2026-07-09).
+    assert config.enrollment_secret == "shared-secret"
+    # Có token thật rồi thì không enroll lại dù secret vẫn còn.
     assert config.needs_enrollment is False
     assert config.poll_interval == 5  # các field khác không bị mất khi ghi lại file
+
+
+def test_clear_token_removes_token_but_keeps_secret(tmp_path):
+    path = _write(
+        tmp_path,
+        "[agent]\nserver_url = https://ryandeploy.example.com\ntoken = dead-token\n"
+        "enrollment_secret = shared-secret\npoll_interval = 5\n",
+    )
+    clear_token(path)
+
+    config = load_config(path)
+    assert config.token == ""
+    assert config.enrollment_secret == "shared-secret"
+    # Không còn token nhưng còn secret -> agent sẽ enroll lại ở lần khởi động/khôi phục kế tiếp.
+    assert config.needs_enrollment is True
+    assert config.poll_interval == 5
 
 
 # ---------------- wait_for_config: chờ agent.ini xuất hiện thay vì thoát service ----------------

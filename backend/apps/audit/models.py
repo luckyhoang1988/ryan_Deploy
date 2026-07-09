@@ -27,6 +27,7 @@ class AuditLog(models.Model):
         JOB_START = "job_start", "Bắt đầu job"
         JOB_FINISH = "job_finish", "Kết thúc job"
         MACHINE_SYNC = "machine_sync", "Đồng bộ máy từ AD"
+        MACHINE_PURGE_ALL = "machine_purge_all", "Xóa toàn bộ máy"
         AGENT_TOKEN_ISSUE = "agent_token_issue", "Cấp token agent"
         AGENT_TOKEN_REVOKE = "agent_token_revoke", "Thu hồi token agent"
         AGENT_ENROLL = "agent_enroll", "Agent tự đăng ký (self-enrollment)"

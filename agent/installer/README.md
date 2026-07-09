@@ -4,6 +4,38 @@
 Startup Script — không cần mở port inbound nào trên máy đích (khác với SMB push hiện có,
 xem `plan_agent.md` §6).
 
+## Phương án A (khuyến nghị, đơn giản nhất): MSI đóng cứng sẵn server + secret tĩnh
+
+"Cài là chạy" — không cần GPO Startup Script, không cần soạn/rải `agent.ini` riêng. Đánh đổi:
+secret nằm **plaintext** trong file `.msi`, nên chỉ phân phối qua kênh nội bộ tin cậy.
+
+1. Tạo 1 `EnrollmentSecret` **KHÔNG HẾT HẠN, KHÔNG giới hạn OU**, đúng 1 lần (UI trang Machines
+   → "Enrollment Secrets" → tick **"Không hết hạn"**, để trống OU). Lưu lại secret ngay — chỉ
+   hiển thị plaintext đúng 1 lần.
+2. Build MSI với secret đó:
+   ```powershell
+   cd agent
+   pyinstaller --clean --noconfirm pyinstaller.spec   # ra agent\dist\RyanDeployAgent.exe
+
+   cd installer
+   .\build.ps1 -EnrollSecret "<secret-vua-tao>" -Version 1.0.0.0
+   # hoặc chỉ định server khác mặc định:
+   .\build.ps1 -EnrollSecret "<secret>" -ServerUrl "https://10.0.193.231" -Version 1.0.0.0
+   ```
+3. Phân phối `RyanDeployAgentSetup.msi` tới máy client bằng bất kỳ cách nào (GPO Software
+   Installation — xem mục 2 bên dưới, chạy tay, SCCM...) — không cần Startup Script, không cần
+   `agent.ini` riêng.
+4. Máy tự enroll ngay sau khi cài xong: MSI tự ghi `agent.ini` và tự gọi `/api/agent/enroll/`
+   qua CustomAction chạy `gpo_startup_enroll.ps1` đóng gói sẵn bên trong (máy vẫn phải đã tồn
+   tại trong DB qua sync AD trước đó — không tự tạo `Machine` mới).
+5. Nếu nghi secret bị lộ: **revoke** secret đó qua UI, build lại MSI với secret mới
+   (`-EnrollSecret` mới), phân phối lại — MSI cũ (chứa secret đã revoke) không còn enroll được
+   máy mới, nhưng không ảnh hưởng các máy đã enroll xong (đã đổi sang token riêng).
+
+Nếu build **không truyền** `-EnrollSecret` (mặc định), MSI giữ nguyên hành vi cũ — không tự
+ghi `agent.ini`, phải rải bằng Phương án B hoặc C bên dưới. Tương thích ngược 100% với các rollout
+đang dùng GPO Startup Script.
+
 ## 1. Build MSI
 
 ```powershell
@@ -15,9 +47,10 @@ cd installer
 .\build.ps1 -Version 1.0.0.0                        # ra RyanDeployAgentSetup.msi
 ```
 
-Yêu cầu cài sẵn [WiX Toolset v3.11+](https://wixtoolset.org/releases/). Mỗi lần build lại để
-publish bản mới, **tăng `-Version`** (vd `1.0.1.0`) — Windows Installer/GPO chỉ coi là nâng cấp
-khi version tăng; `UpgradeCode` trong `Product.wxs` giữ cố định, không sửa.
+Yêu cầu cài sẵn [WiX Toolset v3.11+](https://wixtoolset.org/releases/) (đã kèm sẵn extension
+`WixUtilExtension`, dùng cho CustomAction của Phương án A ở trên). Mỗi lần build lại để publish
+bản mới, **tăng `-Version`** (vd `1.0.1.0`) — Windows Installer/GPO chỉ coi là nâng cấp khi
+version tăng; `UpgradeCode` trong `Product.wxs` giữ cố định, không sửa.
 
 MSI cài `RyanDeployAgent.exe` vào `C:\Program Files\RyanDeployAgent\` và đăng ký làm Windows
 Service (`RyanDeployAgent`, LocalSystem, tự khởi động cùng máy).
@@ -33,9 +66,9 @@ Service (`RyanDeployAgent`, LocalSystem, tự khởi động cùng máy).
 3. Máy trong OU cần **reboot** để nhận cài đặt lần đầu (Computer Software Installation chỉ áp
    dụng lúc khởi động máy, không áp dụng lúc `gpupdate` thông thường).
 
-## 3. Cấp quyền hàng loạt: Self-enrollment theo OU (khuyến nghị cho rollout ≥ 50-100 máy)
+## 3. Phương án B: Cấp quyền hàng loạt — Self-enrollment theo OU (khuyến nghị cho rollout ≥ 50-100 máy, cần siết theo OU/đợt)
 
-Thay vì cấp 1000 token riêng cho 1000 máy (Phương án B bên dưới), tạo **đúng 1 "enrollment
+Thay vì cấp 1000 token riêng cho 1000 máy (Phương án C bên dưới), tạo **đúng 1 "enrollment
 secret"** dùng chung cho cả OU (hoặc toàn domain), publish **cùng một script/tham số** cho mọi
 máy đích — agent tự gọi `/api/agent/enroll/` lúc khởi động lần đầu để đổi secret lấy token thật
 của riêng nó, ghi vào `agent.ini` cục bộ, rồi hoạt động như bình thường. Từ góc nhìn admin:
@@ -78,7 +111,7 @@ của riêng nó, ghi vào `agent.ini` cục bộ, rồi hoạt động như bì
    công, **thu hồi (revoke) secret** để đóng cửa sổ có thể enroll thêm bằng secret đó (secret
    cũng tự hết hạn theo `expires_at` nếu quên revoke).
 
-### Phương án B: Token per-machine qua CSV (case cần siết chặt hơn, hoặc máy ngoài AD)
+### Phương án C: Token per-machine qua CSV (case cần siết chặt hơn, hoặc máy ngoài AD)
 
 Dùng khi cần kiểm soát chặt từng máy (mỗi token gắn cứng 1 hostname, không có cửa sổ dùng chung),
 hoặc re-enroll một máy đã bị revoke (secret dùng chung không áp dụng được cho máy đã có token).
@@ -144,10 +177,14 @@ trước Startup Scripts, nên lần cài đầu service có thể khởi độn
 
 ## Giới hạn đã biết
 
-- MSI/candle/light chưa được build thử trong môi trường dev (không có WiX Toolset cài sẵn) —
-  `Product.wxs` đã được kiểm tra well-formed XML, nhưng việc build MSI thật và cài/uninstall
-  trên một máy Windows thật (kiểm tra ServiceInstall/ServiceControl hoạt động đúng) cần làm ở
-  môi trường có WiX + quyền admin, chưa nằm trong phạm vi test tự động ở đây.
+- MSI đã build thật thành công bằng WiX Toolset v3 (`candle.exe`/`light.exe`) cho cả 2 nhánh:
+  không truyền `-EnrollSecret` (hành vi cũ) và có truyền (Phương án A). Đã soi trực tiếp các
+  bảng `Property`/`CustomAction`/`InstallExecuteSequence` bên trong file `.msi` build ra (qua
+  COM `WindowsInstaller.Installer`) để xác nhận `SERVERURL`/`ENROLLSECRET` được đóng cứng đúng,
+  và CustomAction enroll chạy đúng thứ tự ngay sau `StartServices`. Việc **cài/uninstall thật
+  trên một máy Windows** (kiểm tra ServiceInstall/ServiceControl chạy đúng, agent tự enroll
+  thành công ngoài thực tế) vẫn chưa làm — cần máy pilot có quyền admin, xem mục "Xác nhận
+  rollout" ở trên.
 - `gpo_startup_provision_token.ps1` đã test thật bằng PowerShell (ghi đúng `agent.ini`, idempotent
   khi token không đổi, bỏ qua an toàn khi thiếu CSV/không khớp hostname, và file `agent.ini`
   sinh ra đã được xác nhận đọc đúng bằng `ryandeploy_agent.config.load_config` thật) — riêng

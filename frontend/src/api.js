@@ -42,7 +42,11 @@ async function request(method, path, body, isForm = false) {
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(extractError(data, res.status));
+    // Đính kèm status + body thô để caller xử lý ca đặc biệt (vd 409 requires_force khi purge).
+    const err = new Error(extractError(data, res.status));
+    err.status = res.status;
+    err.data = data;
+    throw err;
   }
   return data;
 }

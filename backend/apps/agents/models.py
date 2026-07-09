@@ -62,7 +62,11 @@ class EnrollmentSecret(TimeStampedModel):
     secret_prefix = models.CharField(
         max_length=8, blank=True, help_text="Phần đầu secret (không bí mật) để admin nhận diện trong UI/audit",
     )
-    expires_at = models.DateTimeField(help_text="Bắt buộc — secret dùng chung phải có hạn ngắn.")
+    expires_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Để trống = không bao giờ tự hết hạn (chỉ dùng khi admin chủ động chọn "
+                   "'never_expires', ví dụ secret tĩnh đóng cứng vào MSI cài đặt).",
+    )
     max_uses = models.PositiveIntegerField(null=True, blank=True)
     use_count = models.PositiveIntegerField(default=0)
     revoked_at = models.DateTimeField(null=True, blank=True)
@@ -83,7 +87,7 @@ class EnrollmentSecret(TimeStampedModel):
     def is_active(self) -> bool:
         if self.revoked_at is not None:
             return False
-        if timezone.now() >= self.expires_at:
+        if self.expires_at is not None and timezone.now() >= self.expires_at:
             return False
         if self.max_uses is not None and self.use_count >= self.max_uses:
             return False

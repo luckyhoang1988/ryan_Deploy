@@ -94,7 +94,7 @@ def enroll_machine(secret_raw: str, hostname: str, source_ip: str = "") -> tuple
             raise EnrollmentError("Secret không hợp lệ.")
         if secret.revoked_at is not None:
             raise EnrollmentError("Secret đã bị thu hồi.")
-        if secret.expires_at <= now:
+        if secret.expires_at is not None and secret.expires_at <= now:
             raise EnrollmentError("Secret đã hết hạn.")
         if secret.max_uses is not None and secret.use_count >= secret.max_uses:
             raise EnrollmentError("Secret đã hết lượt sử dụng.")

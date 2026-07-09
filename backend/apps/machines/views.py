@@ -11,7 +11,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.agents.models import EnrollmentSecret
+from apps.agents.models import AgentToken, EnrollmentSecret
 from apps.agents.services import issue_enrollment_secret, issue_token, revoke_enrollment_secret, revoke_token
 from apps.audit.models import AuditLog
 from apps.core.permissions import IsAdmin, IsViewerOrAbove
@@ -108,7 +108,29 @@ class MachineViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"])
     def purge_all(self, request):
-        """Xóa tất cả máy trong DB (reset trước khi sync lại với OU mới)."""
+        """
+        Xóa tất cả máy trong DB (reset trước khi sync lại với OU mới).
+
+        Vì AgentToken.machine là on_delete=CASCADE, xóa máy sẽ xóa luôn token agent → mọi agent
+        đang chạy sẽ kẹt 401 vĩnh viễn (không tự re-enroll). Nên nếu còn token agent active mà
+        client chưa gửi force=true, ta CHẶN và trả cảnh báo số agent bị ảnh hưởng để admin xác
+        nhận có chủ đích, tránh vô tình giết toàn bộ agent như sự cố 2026-07-09.
+        """
+        force = bool(request.data.get("force"))
+        active_tokens = AgentToken.objects.filter(revoked_at__isnull=True).count()
+        if active_tokens and not force:
+            return Response(
+                {
+                    "detail": f"Còn {active_tokens} máy đang có token agent active. Xóa máy sẽ "
+                              f"xóa luôn token (CASCADE) khiến các agent này kẹt 401 và KHÔNG tự "
+                              f"đăng ký lại — phải cài lại agent hoặc xóa token thủ công trên máy. "
+                              f"Gửi lại với force=true nếu thực sự muốn xóa.",
+                    "agent_tokens_affected": active_tokens,
+                    "requires_force": True,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        machines_before = Machine.objects.count()
         try:
             count, _ = Machine.objects.all().delete()
         except ProtectedError:
@@ -117,8 +139,18 @@ class MachineViewSet(viewsets.ModelViewSet):
                            "các deployment liên quan trước."},
                 status=status.HTTP_409_CONFLICT,
             )
+        # Audit: đây là hành động Tier-0 phá hủy (đã giết toàn bộ agent hôm 2026-07-09).
+        # Ghi lại ai đã ép force để xóa cả khi còn token agent active → có dấu vết truy vết.
+        AuditLog.record(
+            AuditLog.Action.MACHINE_PURGE_ALL,
+            user=request.user,
+            machines_before=machines_before,
+            objects_deleted=count,
+            agent_tokens_destroyed=active_tokens,
+            forced=force,
+        )
         return Response(
-            {"detail": f"Đã xóa {count} máy.", "deleted": count},
+            {"detail": f"Đã xóa {count} máy.", "deleted": count, "agent_tokens_destroyed": active_tokens},
         )
 
     @action(detail=False, methods=["get"])
@@ -258,6 +290,8 @@ class EnrollmentSecretViewSet(viewsets.ModelViewSet):
         ad_ou = (request.data.get("ad_ou") or "").strip()
         note = (request.data.get("note") or "").strip()
 
+        never_expires = bool(request.data.get("never_expires"))
+
         expires_at = request.data.get("expires_at")
         expires_in_hours = request.data.get("expires_in_hours")
         if expires_at:
@@ -272,9 +306,12 @@ class EnrollmentSecretViewSet(viewsets.ModelViewSet):
             except (TypeError, ValueError):
                 return Response({"detail": "expires_in_hours phải là số dương."}, status=status.HTTP_400_BAD_REQUEST)
             expires_at = timezone.now() + timedelta(hours=hours)
+        elif never_expires:
+            expires_at = None
         else:
             return Response(
-                {"detail": "Cần truyền expires_at hoặc expires_in_hours."}, status=status.HTTP_400_BAD_REQUEST,
+                {"detail": "Cần truyền expires_at, expires_in_hours, hoặc never_expires=true."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         max_uses = request.data.get("max_uses") or None
@@ -293,7 +330,9 @@ class EnrollmentSecretViewSet(viewsets.ModelViewSet):
         )
         AuditLog.record(
             AuditLog.Action.AGENT_ENROLLMENT_SECRET_CREATE, user=request.user,
-            ad_ou=ad_ou or "global", expires_at=expires_at.isoformat(), max_uses=max_uses,
+            ad_ou=ad_ou or "global",
+            expires_at=expires_at.isoformat() if expires_at else "never",
+            max_uses=max_uses,
         )
         data = EnrollmentSecretSerializer(secret).data
         data["secret"] = raw

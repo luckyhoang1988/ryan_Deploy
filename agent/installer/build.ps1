@@ -5,17 +5,26 @@ Build RyanDeployAgentSetup.msi từ Product.wxs bằng WiX Toolset v3 (candle.ex
 Yêu cầu:
   - Đã cài WiX Toolset v3.11+ (https://wixtoolset.org/releases/) — biến môi trường WIX phải
     trỏ tới thư mục cài đặt (installer WiX tự set biến này), hoặc candle.exe/light.exe có
-    sẵn trong PATH.
+    sẵn trong PATH. Extension WixUtilExtension (dùng cho CustomAction CAQuietExec) đi kèm sẵn
+    trong bộ cài WiX chuẩn, không cần cài thêm.
   - Đã build agent\dist\RyanDeployAgent.exe bằng PyInstaller trước:
         cd agent
         pyinstaller --clean --noconfirm pyinstaller.spec
 
 Sử dụng:
-  .\build.ps1                  # dùng version mặc định 1.0.0.0
+  .\build.ps1                  # dùng version mặc định 1.0.0.0, không đóng cứng secret
   .\build.ps1 -Version 1.2.0.0 # tăng version mỗi lần rebuild để GPO nhận là upgrade
+
+  # Phương án A — MSI "cài là chạy": đóng cứng server + 1 secret KHÔNG HẾT HẠN (tạo trong UI
+  # Machines > Enrollment Secrets > tick "Không hết hạn"). ⚠️ Secret sẽ nằm PLAINTEXT trong file
+  # .msi build ra — chỉ phân phối MSI qua kênh nội bộ tin cậy, và revoke + build lại ngay nếu lộ.
+  .\build.ps1 -EnrollSecret "<secret-vua-tao>"
+  .\build.ps1 -EnrollSecret "<secret>" -ServerUrl "https://10.0.193.231"
 #>
 param(
-    [string]$Version = "1.0.0.0"
+    [string]$Version = "1.0.0.0",
+    [string]$ServerUrl = "https://10.0.193.231",
+    [string]$EnrollSecret = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,12 +54,20 @@ New-Item -ItemType Directory -Force -Path $objDir | Out-Null
 Write-Host "candle.exe: $candle"
 Write-Host "light.exe : $light"
 Write-Host "Version   : $Version"
+Write-Host "ServerUrl : $ServerUrl"
+if ($EnrollSecret) {
+    Write-Host "EnrollSecret: (đã truyền — Phương án A, MSI sẽ tự enroll lúc cài)"
+    Write-Warning "Secret sẽ nằm PLAINTEXT trong $((Join-Path $scriptDir 'RyanDeployAgentSetup.msi')). Chỉ phân phối MSI này qua kênh nội bộ tin cậy."
+} else {
+    Write-Host "EnrollSecret: (rỗng — giữ hành vi cũ, agent.ini phải rải bằng cách khác)"
+}
 
-& $candle -dProductVersion="$Version" -out "$objDir\" -arch x64 (Join-Path $scriptDir "Product.wxs")
+& $candle -dProductVersion="$Version" -dServerUrl="$ServerUrl" -dEnrollSecret="$EnrollSecret" `
+    -ext WixUtilExtension -out "$objDir\" -arch x64 (Join-Path $scriptDir "Product.wxs")
 if ($LASTEXITCODE -ne 0) { throw "candle.exe thất bại (exit $LASTEXITCODE)" }
 
 $msiPath = Join-Path $scriptDir "RyanDeployAgentSetup.msi"
-& $light -out $msiPath (Join-Path $objDir "Product.wixobj")
+& $light -ext WixUtilExtension -out $msiPath (Join-Path $objDir "Product.wixobj")
 if ($LASTEXITCODE -ne 0) { throw "light.exe thất bại (exit $LASTEXITCODE)" }
 
 Write-Host "Đã build xong: $msiPath"

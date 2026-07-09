@@ -64,7 +64,7 @@ class RyanDeployAgentService(win32serviceutil.ServiceFramework):
                 self.ReportServiceStatus(win32service.SERVICE_STOPPED)
                 return
 
-            loop = PollLoop(config, self._stop_event)
+            loop = PollLoop(config, self._stop_event, config_path=DEFAULT_CONFIG_PATH)
             thread = threading.Thread(target=loop.run_forever, name="ryandeploy-poll-loop", daemon=True)
             thread.start()
             logger.info("RyanDeployAgent: đã khởi động.")

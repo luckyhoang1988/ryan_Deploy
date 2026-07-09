@@ -95,15 +95,32 @@ def wait_for_config(path: str, stop_event: threading.Event) -> Optional[AgentCon
 
 
 def persist_token(path: str, token: str) -> None:
-    """Ghi token thật vào agent.ini sau khi enroll thành công, xóa 'enrollment_secret' (đã dùng
-    xong — giữ lại chỉ tăng bề mặt lộ nếu file bị đọc trộm sau này). Ghi qua file tạm +
-    os.replace() để tránh corrupt file nếu service bị kill giữa lúc ghi."""
+    """Ghi token thật vào agent.ini sau khi enroll thành công. GIỮ NGUYÊN 'enrollment_secret':
+    nếu sau này token bị xóa/thu hồi trên server (vd admin purge máy → CASCADE xóa token, sự cố
+    2026-07-09), agent cần secret này để tự re-enroll thay vì kẹt 401 vĩnh viễn phải cài lại tay.
+    Secret là bí mật dùng chung theo OU đã có sẵn trên máy (GPO ghi lúc rollout) nên giữ lại
+    không tăng đáng kể bề mặt lộ, và server vẫn có thể thu hồi/để hết hạn secret khi cần. Ghi qua
+    file tạm + os.replace() để tránh corrupt file nếu service bị kill giữa lúc ghi."""
+    _rewrite(path, {"token": token})
+
+
+def clear_token(path: str) -> None:
+    """Xóa 'token' khỏi agent.ini để buộc agent enroll lại (dùng khi token bị server từ chối lặp
+    lại — token đã chết). Giữ nguyên 'enrollment_secret' để enroll lại được. Ghi xuống đĩa (không
+    chỉ trong RAM) để nếu service crash giữa lúc khôi phục, lần khởi động sau vẫn re-enroll."""
+    _rewrite(path, remove=("token",))
+
+
+def _rewrite(path: str, set_options: Optional[dict] = None, remove: tuple = ()) -> None:
+    """Đọc–sửa–ghi agent.ini nguyên tử (file tạm + os.replace), giữ nguyên các option khác."""
     parser = configparser.ConfigParser()
     parser.read(path, encoding="utf-8")
     if not parser.has_section("agent"):
         parser.add_section("agent")
-    parser.set("agent", "token", token)
-    parser.remove_option("agent", "enrollment_secret")
+    for key, value in (set_options or {}).items():
+        parser.set("agent", key, value)
+    for key in remove:
+        parser.remove_option("agent", key)
 
     tmp_path = f"{path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as fh:

@@ -447,3 +447,76 @@ def test_purge_all_blocked_when_machine_has_job(admin_client):
     r = admin_client.post("/api/machines/purge_all/", {}, content_type="application/json")
     assert r.status_code == 409
     assert Machine.objects.filter(id=machine.id).exists()
+
+
+# --- purge_all: chặn khi còn token agent active (CASCADE sẽ giết agent) ---
+
+
+def test_purge_all_blocked_when_active_agent_token_without_force(admin_client):
+    from apps.agents.services import issue_token
+    from apps.machines.models import Machine
+
+    machine = Machine.objects.create(hostname="PC-AGENT")
+    issue_token(machine)
+
+    r = admin_client.post("/api/machines/purge_all/", {}, content_type="application/json")
+    assert r.status_code == 409
+    body = r.json()
+    assert body["requires_force"] is True
+    assert body["agent_tokens_affected"] == 1
+    # Không có gì bị xóa khi bị chặn.
+    assert Machine.objects.filter(id=machine.id).exists()
+
+
+def test_purge_all_with_force_deletes_despite_active_agent_token(admin_client):
+    from apps.agents.services import issue_token
+    from apps.machines.models import Machine
+
+    machine = Machine.objects.create(hostname="PC-AGENT2")
+    issue_token(machine)
+
+    r = admin_client.post(
+        "/api/machines/purge_all/", {"force": True}, content_type="application/json"
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted"] >= 1
+    assert body["agent_tokens_destroyed"] == 1
+    assert not Machine.objects.filter(id=machine.id).exists()
+
+
+# --- purge_all: ghi audit log cho hành động Tier-0 phá hủy ---
+
+
+def test_purge_all_records_audit_log_with_force(admin_client):
+    from apps.agents.services import issue_token
+    from apps.audit.models import AuditLog
+    from apps.machines.models import Machine
+
+    machine = Machine.objects.create(hostname="PC-AGENT3")
+    issue_token(machine)
+
+    r = admin_client.post(
+        "/api/machines/purge_all/", {"force": True}, content_type="application/json"
+    )
+    assert r.status_code == 200
+
+    log = AuditLog.objects.filter(action=AuditLog.Action.MACHINE_PURGE_ALL).latest("created_at")
+    assert log.user is not None  # phải biết ai đã ép xóa
+    assert log.detail["forced"] is True
+    assert log.detail["agent_tokens_destroyed"] == 1
+    assert log.detail["objects_deleted"] >= 1
+
+
+def test_purge_all_no_audit_log_when_blocked(admin_client):
+    """Bị chặn (409, chưa force) thì KHÔNG có gì bị xóa → không ghi log 'đã xóa'."""
+    from apps.agents.services import issue_token
+    from apps.audit.models import AuditLog
+    from apps.machines.models import Machine
+
+    machine = Machine.objects.create(hostname="PC-AGENT4")
+    issue_token(machine)
+
+    r = admin_client.post("/api/machines/purge_all/", {}, content_type="application/json")
+    assert r.status_code == 409
+    assert not AuditLog.objects.filter(action=AuditLog.Action.MACHINE_PURGE_ALL).exists()

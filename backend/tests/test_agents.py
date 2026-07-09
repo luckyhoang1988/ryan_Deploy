@@ -557,6 +557,24 @@ def test_enroll_rejects_machine_already_has_active_token(agent_machine):
         enroll_machine(raw_secret, agent_machine.hostname)
 
 
+def test_enroll_succeeds_with_never_expiring_secret(agent_machine):
+    # Secret tĩnh đóng cứng vào MSI (Phương án A trong README) — expires_at=None nghĩa là
+    # không bao giờ tự hết hạn, chỉ mất hiệu lực khi bị revoke tường minh.
+    raw_secret, secret = issue_enrollment_secret("", None)
+    assert secret.expires_at is None
+    raw_token, machine = enroll_machine(raw_secret, agent_machine.hostname)
+    assert machine.pk == agent_machine.pk
+    assert AgentToken.objects.get(machine=agent_machine).token_hash == hash_token(raw_token)
+
+
+def test_never_expiring_secret_is_active_until_revoked(db):
+    _raw_secret, secret = issue_enrollment_secret("", None)
+    assert secret.is_active is True
+    revoke_enrollment_secret(secret)
+    secret.refresh_from_db()
+    assert secret.is_active is False
+
+
 def test_enroll_rejects_invalid_secret(agent_machine):
     with pytest.raises(EnrollmentError, match="không hợp lệ"):
         enroll_machine("not-a-real-secret", agent_machine.hostname)
@@ -664,6 +682,20 @@ def test_create_enrollment_secret_returns_raw_secret_once(admin_client, db):
 def test_create_enrollment_secret_requires_expiry(admin_client, db):
     resp = admin_client.post("/api/enrollment-secrets/", {"ad_ou": ""}, content_type="application/json")
     assert resp.status_code == 400
+
+
+def test_create_enrollment_secret_never_expires_requires_explicit_flag(admin_client, db):
+    # never_expires=true tạo được secret không hết hạn (dùng đóng cứng vào MSI) — chỉ khi
+    # admin chủ động chọn, không phải hành vi mặc định khi bỏ trống mọi tùy chọn hết hạn.
+    resp = admin_client.post(
+        "/api/enrollment-secrets/", {"ad_ou": "", "never_expires": True}, content_type="application/json",
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["expires_at"] is None
+    secret = EnrollmentSecret.objects.get(pk=data["id"])
+    assert secret.expires_at is None
+    assert secret.is_active is True
 
 
 def test_list_never_exposes_hash(admin_client, db):
