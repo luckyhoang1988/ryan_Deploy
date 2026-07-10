@@ -64,7 +64,12 @@ def _run_job_in(client: AgentClient, job: dict, workdir: str, timeout: int) -> J
 
     payload = job.get("payload")
     if payload:
-        local_path = os.path.join(workdir, payload["filename"])
+        # os.path.basename: filename tới từ server (job payload) — nếu là đường dẫn tuyệt đối
+        # (vd "C:\\Windows\\evil.exe"), os.path.join(workdir, ...) sẽ BỎ QUA workdir và trả về
+        # thẳng đường dẫn đó (hành vi chuẩn của os.path.join khi tham số sau là tuyệt đối), khiến
+        # agent ghi file ra ngoài thư mục tạm. Django storage đã sanitize tên khi lưu server-side,
+        # nhưng agent không nên phụ thuộc hoàn toàn vào đó — phòng thủ chiều sâu ở phía nhận.
+        local_path = os.path.join(workdir, os.path.basename(payload["filename"]))
         try:
             header_sha256 = client.download_to(payload["download_url"], local_path)
         except ApiError as e:

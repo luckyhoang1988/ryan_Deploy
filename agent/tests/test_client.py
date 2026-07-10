@@ -116,6 +116,37 @@ def test_http_error_status_raises_api_error():
         client.poll_job()
 
 
+def test_download_to_rejects_cross_origin_url(tmp_path):
+    dest = tmp_path / "payload.exe"
+    session = FakeSession(response=FakeResponse(chunks=[b"abc"]))
+    client = AgentClient(_config(), session=session)
+    with pytest.raises(ApiError, match="khác origin"):
+        client.download_to("https://evil.example.org/steal.exe", str(dest))
+    assert session.calls == []  # không gửi request (và không kèm token) ra ngoài
+    assert not dest.exists()
+
+
+def test_download_to_rejects_cross_port_same_host(tmp_path):
+    dest = tmp_path / "payload.exe"
+    session = FakeSession(response=FakeResponse(chunks=[b"abc"]))
+    client = AgentClient(_config(), session=session)
+    with pytest.raises(ApiError, match="khác origin"):
+        client.download_to("https://ryandeploy.example.com:8443/api/agent/packages/1/download/", str(dest))
+    assert session.calls == []
+
+
+def test_download_to_allows_default_https_port_match(tmp_path):
+    dest = tmp_path / "payload.exe"
+    session = FakeSession(
+        response=FakeResponse(chunks=[b"abc"], headers={"X-Ryandeploy-Sha256": "deadbeef"})
+    )
+    client = AgentClient(_config(), session=session)
+    # server_url không ghi rõ :443, URL server trả cũng không — vẫn phải coi là cùng origin.
+    sha = client.download_to("https://ryandeploy.example.com/api/agent/scripts/verify.ps1", str(dest))
+    assert sha == "deadbeef"
+    assert len(session.calls) == 1
+
+
 def test_verify_tls_passed_through():
     session = FakeSession(response=FakeResponse(json_data={"job": None}))
     client = AgentClient(_config(verify_tls=False), session=session)

@@ -50,6 +50,30 @@ function Write-Log([string]$Message) {
     }
 }
 
+function Protect-AgentIni([string]$Path) {
+    # Siết ACL agent.ini chỉ cho SYSTEM + Administrators + user đang chạy script này — mặc định
+    # ProgramData cho "Users" quyền Read, nghĩa là bất kỳ user cục bộ không-admin nào cũng đọc
+    # được token trong file này (chiếm quyền agent trên server chỉ bằng cách đọc file cục bộ).
+    # Dùng SID chuẩn (*S-1-5-18 = SYSTEM, *S-1-5-32-544 = Administrators) để không phụ thuộc ngôn
+    # ngữ hệ điều hành. Luôn thêm SID của chính tiến trình đang ghi (SYSTEM khi chạy qua GPO
+    # Startup thật — trùng SID đã có sẵn, không đổi gì; user thường khi test thủ công — để không
+    # tự khoá chính mình khỏi file vừa ghi ở lần chạy kế tiếp). Gọi lại mỗi lần script chạy (kể cả
+    # khi nội dung không đổi) để backfill ACL cho máy đã rollout trước khi có bản vá này.
+    $grants = @("*S-1-5-18:F", "*S-1-5-32-544:F")
+    try {
+        $currentSid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
+        $grants += "*$($currentSid):F"
+    } catch {
+        # Không lấy được SID hiện tại — vẫn tiếp tục siết ACL với SYSTEM + Administrators.
+    }
+    try {
+        & icacls $Path /inheritance:r /grant:r @grants | Out-Null
+        Write-Log "Đã siết ACL trên '$Path' (chỉ SYSTEM + Administrators + user hiện tại)."
+    } catch {
+        Write-Log "Lỗi khi siết ACL trên '$Path': $($_.Exception.Message)"
+    }
+}
+
 function Main {
     New-Item -ItemType Directory -Force -Path $ProgramDataDir | Out-Null
 
@@ -76,11 +100,13 @@ function Main {
 
     $existing = if (Test-Path $IniPath) { Get-Content -Path $IniPath -Raw -ErrorAction SilentlyContinue } else { $null }
     if ($existing -and ($existing.Trim() -eq $newContent.Trim())) {
-        Write-Log "agent.ini cho '$computerName' đã đúng token hiện tại — không ghi lại."
+        Write-Log "agent.ini cho '$computerName' đã đúng token hiện tại — không ghi lại nội dung, chỉ đảm bảo ACL."
+        Protect-AgentIni -Path $IniPath
         return
     }
 
     Set-Content -Path $IniPath -Value $newContent -Encoding ASCII
+    Protect-AgentIni -Path $IniPath
     Write-Log "Đã ghi agent.ini cho '$computerName' (server_url=$ServerUrl)."
 
     try {

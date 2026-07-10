@@ -6,13 +6,14 @@ Dùng `urllib.request` (stdlib) — project không có `requests`, và pin crypt
 (do impacket) khiến việc thêm dep là rủi ro. Chỉ admin được gọi (SSRF surface): validate
 scheme http/https, trần dung lượng, timeout.
 """
+import http.client
 import ipaddress
 import logging
 import os
 import socket
 import tempfile
 from urllib.parse import unquote, urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPHandler, HTTPSHandler, Request, build_opener
 
 from django.conf import settings
 from django.core.files import File
@@ -37,11 +38,17 @@ class DownloadError(Exception):
     """Lỗi tải/khởi tạo version — thông điệp an toàn để trả về client."""
 
 
-def _ensure_public_host(hostname: str) -> None:
+def _resolve_validated_ip(hostname: str) -> str:
     """
     Chặn SSRF: resolve hostname, từ chối nếu BẤT KỲ IP nào rơi vào dải nội bộ/đặc biệt
     (loopback, link-local — gồm 169.254.169.254 cloud metadata, RFC1918 private,
     reserved, multicast). Admin-only nhưng vẫn là bề mặt SSRF nên phải chặn cứng.
+
+    Trả về 1 IP hợp lệ (bản ghi đầu tiên) để PIN kết nối vào đúng IP này — xem
+    _PinnedHTTPConnection/_PinnedHTTPSConnection. Nếu chỉ validate rồi để urllib tự resolve
+    lại lúc connect thật (như bản cũ), sẽ có cửa sổ TOCTOU DNS-rebinding: DNS trả IP công
+    khai lúc check, đổi sang IP nội bộ lúc connect thật (attacker kiểm soát DNS của domain
+    họ đưa cho admin tải).
     """
     if not hostname:
         raise DownloadError("URL thiếu hostname.")
@@ -60,15 +67,79 @@ def _ensure_public_host(hostname: str) -> None:
             raise DownloadError(
                 f"URL trỏ tới địa chỉ nội bộ/đặc biệt ({ip}) — không cho phép (chống SSRF)."
             )
+    return infos[0][4][0]
 
 
-class _SafePublicOnlyRedirectHandler(HTTPRedirectHandler):
-    """Re-kiểm tra host của URL đích trước khi cho phép redirect — chặn bypass SSRF qua
-    redirect (server công khai redirect sang IP nội bộ sau khi qua check ban đầu)."""
+def _ensure_public_host(hostname: str) -> None:
+    """Kiểm tra sớm (fail-fast trước khi tạo bản ghi PackageDownload trong fetch()) — validate
+    thật sự (kèm PIN chống TOCTOU) diễn ra lại ngay trước lúc connect, xem _SafeHTTPHandler/
+    _SafeHTTPSHandler bên dưới."""
+    _resolve_validated_ip(hostname)
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        _ensure_public_host(urlparse(newurl).hostname)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """Kết nối thẳng tới IP đã validate (_pinned_ip) — không tự resolve lại hostname lúc
+    connect, đóng cửa sổ TOCTOU DNS-rebinding giữa lúc validate và lúc connect thật."""
+
+    _pinned_ip = ""
+
+    def connect(self):
+        self.sock = socket.create_connection(
+            (self._pinned_ip, self.port), self.timeout, self.source_address
+        )
+        if self._tunnel_host:
+            self._tunnel()
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Như trên, cho HTTPS — TCP connect() dùng IP đã pin, còn SNI/xác thực chứng chỉ TLS vẫn
+    dùng đúng hostname gốc (self.host) nên không ảnh hưởng tính đúng đắn của việc xác thực TLS."""
+
+    _pinned_ip = ""
+
+    def connect(self):
+        sock = socket.create_connection(
+            (self._pinned_ip, self.port), self.timeout, self.source_address
+        )
+        if self._tunnel_host:
+            self.sock = sock
+            self._tunnel()
+            server_hostname = self._tunnel_host
+        else:
+            server_hostname = self.host
+        self.sock = self._context.wrap_socket(sock, server_hostname=server_hostname)
+
+
+class _SafeHTTPHandler(HTTPHandler):
+    """Validate + pin IP ngay trước khi mở TỪNG kết nối — kể cả sau mỗi lần redirect
+    (OpenerDirector gọi lại http_open/https_open cho URL đích mới mỗi lần redirect), nên
+    redirect sang IP nội bộ cũng bị chặn mà không cần handler redirect riêng."""
+
+    def http_open(self, req):
+        pinned_ip = _resolve_validated_ip(urlparse(req.full_url).hostname)
+
+        def factory(host, **kwargs):
+            conn = _PinnedHTTPConnection(host, **kwargs)
+            conn._pinned_ip = pinned_ip
+            return conn
+
+        return self.do_open(factory, req)
+
+
+class _SafeHTTPSHandler(HTTPSHandler):
+    def https_open(self, req):
+        pinned_ip = _resolve_validated_ip(urlparse(req.full_url).hostname)
+
+        def factory(host, **kwargs):
+            conn = _PinnedHTTPSConnection(host, **kwargs)
+            conn._pinned_ip = pinned_ip
+            return conn
+
+        # context: dùng self._context (đã build sẵn ở HTTPSHandler.__init__, gồm cả
+        # check_hostname/verify_mode) — không tự lấy self._check_hostname vì thuộc tính này
+        # không tồn tại xuyên suốt mọi phiên bản Python (Python 3.14 gộp hẳn vào context,
+        # bỏ attribute riêng — xác nhận bằng chạy thật, không đoán theo trí nhớ API cũ).
+        return self.do_open(factory, req, context=self._context)
 
 
 def _filename_from(url: str, content_disposition: str) -> str:
@@ -93,12 +164,13 @@ def _filename_from(url: str, content_disposition: str) -> str:
 def _stream_to_temp(url: str, max_bytes: int, timeout: int) -> tuple[str, str]:
     """Tải URL ra file tạm với trần dung lượng. Trả (temp_path, filename)."""
     req = Request(url, headers={"User-Agent": _USER_AGENT})
-    opener = build_opener(_SafePublicOnlyRedirectHandler)
+    opener = build_opener(_SafeHTTPHandler(), _SafeHTTPSHandler())
     fd, temp_path = tempfile.mkstemp(prefix="ryandeploy_dl_")
     written = 0
     try:
-        # noqa: S310 — scheme đã validate ở fetch(), host (kể cả sau redirect) được
-        # _SafePublicOnlyRedirectHandler + _ensure_public_host chặn SSRF.
+        # noqa: S310 — scheme đã validate ở fetch(); host (kể cả sau redirect) được
+        # _SafeHTTPHandler/_SafeHTTPSHandler validate + PIN đúng IP ngay trước khi connect,
+        # không còn khoảng hở TOCTOU DNS-rebinding giữa lúc check và lúc connect thật.
         with opener.open(req, timeout=timeout) as resp:
             filename = _filename_from(url, resp.headers.get("Content-Disposition", ""))
             with os.fdopen(fd, "wb") as out:

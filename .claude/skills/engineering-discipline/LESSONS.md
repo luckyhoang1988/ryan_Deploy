@@ -14,6 +14,84 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-10 — requests.Session.headers kèm Authorization cho MỌI request bất kể host — phải tự chốt same-origin trước khi gọi absolute URL do server trả
+**Bối cảnh:** Vá HIGH #2 audit — `AgentClient.__init__` set `self._session.headers["Authorization"]
+= f"Bearer {token}"` một lần cho cả `requests.Session`. `download_to()` (tải payload cài đặt/
+verify script/precheck script) nhận `url` là URL TUYỆT ĐỐI do chính SERVER trả trong payload job
+(`download_url`, `script_url`), rồi gọi thẳng `self._session.request("GET", url, ...)` với
+`absolute=True` — không có bước nào kiểm tra `url` có cùng origin với `server_url` đã cấu hình
+hay không.
+**Bài học:**
+1. `requests.Session.headers` (khác `requests.Session.auth` với một số auth handler biết tự giới
+   hạn theo host) được đính kèm cho **MỌI** request gửi qua session đó, không phân biệt destination
+   host — đây là hành vi tài liệu hoá của thư viện, không phải bug. Chỉ riêng cơ chế redirect
+   (`resolve_redirects`) mới tự strip `Authorization` khi 3xx trỏ sang host khác; request KHỞI ĐẦU
+   (không phải redirect) tới bất kỳ URL nào truyền vào `session.request()` vẫn kèm nguyên header.
+2. Hiện tại `download_url`/`script_url` server trả luôn được build qua
+   `request.build_absolute_uri(reverse(...))` (`backend/apps/agents/views.py`) nên luôn cùng host
+   với request agent vừa gọi tới — do Django validate `Host` theo `ALLOWED_HOSTS`. Nhưng đó là
+   đảm bảo ở TẦNG SERVER, không phải tầng client — agent không có cách nào tự biết server có đang
+   trả đúng hay không nếu không tự kiểm. Không nên để agent "tin tưởng mù" URL do server đưa: nếu
+   server bị compromise (kẻ tấn công có quyền ghi DB Job/PackageVersion, hoặc một bug tương lai ở
+   backend tạo nhầm URL trỏ ra ngoài), agent sẽ tự nguyện gửi token thật (sống, dùng để giả mạo
+   agent gửi heartbeat/report job) tới bất kỳ host nào mà không hề biết.
+3. Fix: thêm `_origin(url)` (so `scheme`+`hostname`+`port`, tự suy port mặc định 80/443 khi URL
+   không ghi rõ) và chặn NGAY TRONG `_request()` trước khi gọi `session.request()` nếu
+   `absolute=True` mà origin khác `server_url` cấu hình — raise `ApiError` luôn, KHÔNG gửi request
+   ra ngoài (không chỉ strip header rồi vẫn gửi, vì bản thân việc gửi request tới host lạ do
+   server chỉ định cũng là một dạng SSRF nhẹ, không có lý do hợp lệ nào để cho phép).
+**Áp dụng:** Bất kỳ chỗ nào client đính kèm credential (header cố định trên session, cookie dùng
+chung...) rồi sau đó gọi tới URL do phía server/đối tác cung cấp (không phải URL do chính client
+tự build từ base URL đã tin cậy) — luôn tự kiểm same-origin ở phía client trước khi gửi, đừng dựa
+hoàn toàn vào việc "phía kia luôn trả đúng" dù đúng ở hiện tại. Test bằng cách giả lập
+`FakeSession` rồi assert `session.calls == []` sau khi gọi với URL khác origin — không chỉ assert
+exception được raise, phải xác nhận request THẬT SỰ chưa từng được gửi.
+
+---
+
+## 2026-07-10 — ACL agent.ini: icacls /inheritance:r khoá luôn admin KHÔNG elevate (UAC filtered token), phải tự cấp thêm SID tiến trình đang ghi
+**Bối cảnh:** Vá HIGH #1 audit (agent.ini ở `C:\ProgramData\RyanDeployAgent\agent.ini` không có
+ACL riêng — kế thừa quyền Read mặc định của ProgramData cho "Users", nghĩa là bất kỳ user cục bộ
+không-admin nào cũng đọc được token/enrollment_secret, chiếm quyền agent trên server). Siết ACL
+bằng `icacls path /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F` (SYSTEM + Administrators,
+dùng SID chuẩn để không phụ thuộc ngôn ngữ hệ điều hành) ở 3 điểm ghi file: `config.py::_rewrite`
+(Python, agent tự persist/clear token) và 2 GPO script (`gpo_startup_provision_token.ps1`,
+`gpo_startup_enroll.ps1`).
+**Bài học:**
+1. **Tài khoản Administrator không elevate (không "Run as Administrator"/không phải SYSTEM) vẫn
+   BỊ CHẶN đọc file chỉ cấp quyền cho nhóm `Administrators`** — Windows UAC dùng "filtered
+   token" cho session không elevate: SID `Administrators` vẫn có trong token nhưng bị đánh dấu
+   deny-only, ACE cấp quyền cho nhóm đó không match. Xác nhận bằng
+   `([Security.Principal.WindowsPrincipal]...).IsInRole([...]::Administrator)` trả `False` dù
+   user thuộc nhóm admin cục bộ, rồi thấy chính `persist_token()`/script PS tự ghi xong lại
+   không đọc lại được ngay (`PermissionError`/"Access is denied") — `configparser.read()` NUỐT
+   lỗi IO âm thầm (bỏ qua file không đọc được, trả section rỗng) nên lỗi ban đầu hiện ra là
+   "thiếu section [agent]" gây hiểu lầm, phải tự mở file bằng `open()` trực tiếp mới thấy đúng
+   `PermissionError`.
+2. **Fix: luôn cấp thêm quyền cho SID của CHÍNH tiến trình đang ghi file**, không chỉ SYSTEM +
+   Administrators cố định. Production (agent service, GPO Startup script) luôn chạy dưới
+   LocalSystem (SID `S-1-5-18`) nên SID thêm vào trùng luôn với SID SYSTEM đã cấp sẵn — không
+   đổi gì. Dev/test/manual remediation chạy dưới user thường thì SID đó mới thực sự cần, để
+   không tự khoá chính mình khỏi file vừa ghi ở lần đọc/ghi kế tiếp (VD guard
+   `Get-ExistingToken` trong `gpo_startup_enroll.ps1` gọi lại `Get-Content` ngay ở lần chạy sau).
+   Python: lấy SID qua `whoami /user /fo csv /nh` (regex `S-1-\d+(-\d+)+`) — không cần
+   `pywin32`, giữ đúng nguyên tắc "config.py thuần Python, test được mọi OS" đã ghi ở đầu
+   `service.py`. PowerShell: `([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value`.
+3. **Guard "bỏ qua ghi vì nội dung không đổi" (idempotent check) phải VẪN gọi lại bước siết ACL**
+   trước khi return, không chỉ trong nhánh ghi mới — nếu không, máy đã rollout TRƯỚC khi có bản
+   vá ACL này sẽ không bao giờ được backfill (script coi nội dung đã khớp nên bỏ qua toàn bộ,
+   kể cả ACL) cho tới khi nội dung agent.ini đổi vì lý do khác (xoay token).
+**Áp dụng:** Bất kỳ lần nào dùng `icacls /inheritance:r /grant:r` để siết 1 file xuống chỉ
+SYSTEM+Administrators — luôn thêm SID của tiến trình đang chạy (không giả định "Administrators
+cục bộ" là đủ, vì phụ thuộc elevation). Test bằng cách tự đọc lại file NGAY SAU khi ghi (không
+chỉ check exit code của icacls) để bắt được lỗi lock-out chính mình sớm — configparser (và nhiều
+parser khác) có thể nuốt lỗi IO âm thầm, đừng tin thông báo lỗi bề mặt ("thiếu section") mà phải
+tự `open()` trực tiếp khi nghi ngờ là vấn đề quyền truy cập. Guard "nội dung không đổi → bỏ qua"
+trong script idempotent phải tách riêng khỏi bước hardening (ACL/quyền) — nội dung không đổi
+không có nghĩa là ACL đã đúng.
+
+---
+
 ## 2026-07-10 — enroll_machine reject cứng "còn token active" gây deadlock enroll vô hạn khi agent mất token cục bộ; agent subprocess.run(shell=True, timeout=) treo vĩnh viễn trên Windows nếu installer sinh tiến trình cháu
 **Bối cảnh:** Điều tra ZP-IT006 "hay mất kết nối" — SSH vào prod, đọc DB/log thật thay vì đoán,
 phát hiện 2 lỗi độc lập cùng ngày. (1) `enroll_machine()` (`backend/apps/agents/services.py`)

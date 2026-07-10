@@ -67,6 +67,31 @@ function Write-Log([string]$Message) {
     }
 }
 
+function Protect-AgentIni([string]$Path) {
+    # Siết ACL agent.ini chỉ cho SYSTEM + Administrators + user đang chạy script này — mặc định
+    # ProgramData cho "Users" quyền Read, nghĩa là bất kỳ user cục bộ không-admin nào cũng đọc
+    # được token/enrollment_secret trong file này (chiếm quyền agent trên server chỉ bằng cách
+    # đọc file cục bộ). Dùng SID chuẩn (*S-1-5-18 = SYSTEM, *S-1-5-32-544 = Administrators) để
+    # không phụ thuộc ngôn ngữ hệ điều hành. Luôn thêm SID của chính tiến trình đang ghi (SYSTEM
+    # khi chạy qua GPO Startup thật — trùng SID đã có sẵn, không đổi gì; user thường khi test thủ
+    # công — để Get-ExistingToken ở lần chạy kế tiếp không tự bị Access Denied). Gọi lại mỗi lần
+    # script chạy (kể cả nhánh bỏ qua ghi vì đã có token thật) để backfill ACL cho máy đã rollout
+    # trước khi có bản vá này.
+    $grants = @("*S-1-5-18:F", "*S-1-5-32-544:F")
+    try {
+        $currentSid = ([Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
+        $grants += "*$($currentSid):F"
+    } catch {
+        # Không lấy được SID hiện tại — vẫn tiếp tục siết ACL với SYSTEM + Administrators.
+    }
+    try {
+        & icacls $Path /inheritance:r /grant:r @grants | Out-Null
+        Write-Log "Đã siết ACL trên '$Path' (chỉ SYSTEM + Administrators + user hiện tại)."
+    } catch {
+        Write-Log "Lỗi khi siết ACL trên '$Path': $($_.Exception.Message)"
+    }
+}
+
 function Get-ExistingToken([string]$Path) {
     if (-not (Test-Path $Path)) {
         return $null
@@ -86,6 +111,7 @@ function Main {
     $existingToken = Get-ExistingToken -Path $IniPath
     if ($existingToken -and -not $Force) {
         Write-Log "agent.ini đã có token thật (đã enroll trước đó) — bỏ qua, KHÔNG ghi đè."
+        Protect-AgentIni -Path $IniPath
         return
     }
     if ($existingToken -and $Force) {
@@ -101,11 +127,13 @@ function Main {
 
     $existing = if (Test-Path $IniPath) { Get-Content -Path $IniPath -Raw -ErrorAction SilentlyContinue } else { $null }
     if ((-not $Force) -and $existing -and ($existing.Trim() -eq $newContent.Trim())) {
-        Write-Log "agent.ini đã đúng enrollment_secret hiện tại — không ghi lại."
+        Write-Log "agent.ini đã đúng enrollment_secret hiện tại — không ghi lại nội dung, chỉ đảm bảo ACL."
+        Protect-AgentIni -Path $IniPath
         return
     }
 
     Set-Content -Path $IniPath -Value $newContent -Encoding ASCII
+    Protect-AgentIni -Path $IniPath
     $forceNote = if ($Force) { " [Force]" } else { "" }
     Write-Log "Đã ghi agent.ini với enrollment_secret cho '$($env:COMPUTERNAME)' (server_url=$ServerUrl)$forceNote."
 

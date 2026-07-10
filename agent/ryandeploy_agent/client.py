@@ -2,6 +2,7 @@
 nghiệp vụ (đó là việc của executor.py/poll_loop.py)."""
 import logging
 from typing import Optional
+from urllib.parse import urlsplit
 
 import requests
 
@@ -10,6 +11,12 @@ from .config import AgentConfig
 logger = logging.getLogger("ryandeploy_agent.client")
 
 _DOWNLOAD_CHUNK_SIZE = 1024 * 256
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _origin(url: str) -> tuple:
+    parts = urlsplit(url)
+    return parts.scheme, parts.hostname, parts.port or _DEFAULT_PORTS.get(parts.scheme)
 
 
 class ApiError(Exception):
@@ -52,8 +59,13 @@ class AgentClient:
         self._request("POST", "/api/agent/heartbeat/", json={"agent_version": agent_version})
 
     def download_to(self, url: str, dest_path: str) -> Optional[str]:
-        """Tải file (URL tuyệt đối do server trả) về dest_path, streaming. Trả header
-        X-Ryandeploy-Sha256 nếu server có gửi kèm (installer), None nếu không (script nội bộ)."""
+        """Tải file (URL tuyệt đối do server trả trong payload job) về dest_path, streaming. Trả
+        header X-Ryandeploy-Sha256 nếu server có gửi kèm (installer), None nếu không (script nội
+        bộ). `_request` tự chặn nếu `url` khác origin với `server_url` cấu hình — session này
+        luôn kèm header Authorization: Bearer <token thật> cho MỌI request (xem __init__), nên
+        nếu lỡ nhận một job có download_url/script_url trỏ ra host khác (server bị compromise,
+        bug tạo URL sai, hay MITM chèn payload), agent sẽ tự gửi token sống cho host lạ đó nếu
+        không có chốt chặn same-origin này."""
         resp = self._request("GET", url, absolute=True, stream=True)
         sha256_header = resp.headers.get("X-Ryandeploy-Sha256") or None
         with open(dest_path, "wb") as fh:
@@ -64,6 +76,11 @@ class AgentClient:
 
     def _request(self, method: str, path: str, *, absolute: bool = False, **kwargs) -> requests.Response:
         url = path if absolute else self._config.build_url(path)
+        if absolute and _origin(url) != _origin(self._config.server_url):
+            # Không gửi request này ra ngoài: self._session kèm sẵn header Authorization cho mọi
+            # request (kể cả absolute=True), nên gửi tới origin khác đồng nghĩa lộ token thật ra
+            # ngoài server đã cấu hình.
+            raise ApiError(f"URL '{url}' khác origin với server_url cấu hình — từ chối gửi kèm token.")
         timeout = kwargs.pop("timeout", self._config.request_timeout)
         try:
             resp = self._session.request(

@@ -9,7 +9,9 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      # Chỉ bind 127.0.0.1 — web/worker/beat nối qua network nội bộ compose (host "postgres"),
+      # không cần expose ra LAN; vẫn cho phép tool trên máy dev (DBeaver, psql...) nối localhost.
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ryandeploy}"]
       interval: 5s
@@ -21,7 +23,9 @@ services:
     environment:
       TZ: Asia/Ho_Chi_Minh
     ports:
-      - "6379:6379"
+      # Chỉ bind 127.0.0.1 — cùng lý do với postgres ở trên; Redis dev vẫn không có auth
+      # nhưng không còn nghe trên toàn LAN.
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

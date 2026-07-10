@@ -3,6 +3,9 @@ test). Không phụ thuộc Django — agent chạy độc lập trên máy đí
 import configparser
 import logging
 import os
+import re
+import subprocess
+import sys
 import threading
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -126,6 +129,46 @@ def _rewrite(path: str, set_options: Optional[dict] = None, remove: tuple = ()) 
     with open(tmp_path, "w", encoding="utf-8") as fh:
         parser.write(fh)
     os.replace(tmp_path, path)
+    _harden_acl(path)
+
+
+def _current_user_sid() -> Optional[str]:
+    """Lấy SID của user đang chạy tiến trình hiện tại qua `whoami` (không cần pywin32). Prod:
+    agent chạy dưới LocalSystem (S-1-5-18) — trùng với SID đã cấp sẵn trong _harden_acl nên
+    không thêm gì mới. Dev/test: user thường (không phải SYSTEM/Administrators) cần được cấp
+    quyền để tự đọc lại file vừa ghi, nếu không mọi lần persist_token/clear_token sau đó sẽ tự
+    khoá luôn chính tiến trình đang giữ file."""
+    try:
+        out = subprocess.run(
+            ["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, timeout=10, check=True, text=True,
+        ).stdout
+        match = re.search(r"S-1-\d+(?:-\d+)+", out)
+        return match.group(0) if match else None
+    except Exception:
+        return None
+
+
+def _harden_acl(path: str) -> None:
+    """Siết ACL agent.ini chỉ cho SYSTEM + Administrators + user đang ghi file — mặc định
+    ProgramData cho 'Users' quyền Read, nghĩa là bất kỳ user cục bộ không-admin nào cũng đọc được
+    token/enrollment_secret trong file này (chiếm quyền agent trên server chỉ bằng cách đọc file
+    cục bộ, không cần khai thác gì thêm). Dùng icacls (có sẵn mọi bản Windows) thay vì
+    win32security để KHÔNG kéo pywin32 vào module này — giữ nguyên tính chất "thuần Python, test
+    được trên mọi hệ điều hành" đã ghi ở đầu service.py. Dùng SID chuẩn (*S-1-5-18 = SYSTEM,
+    *S-1-5-32-544 = Administrators) để không phụ thuộc ngôn ngữ hệ điều hành."""
+    if sys.platform != "win32":
+        return
+    grants = ["*S-1-5-18:F", "*S-1-5-32-544:F"]
+    sid = _current_user_sid()
+    if sid:
+        grants.append(f"*{sid}:F")
+    try:
+        subprocess.run(
+            ["icacls", path, "/inheritance:r", "/grant:r", *grants],
+            capture_output=True, timeout=10, check=True,
+        )
+    except Exception as e:  # noqa: BLE001 — không để lỗi ACL làm hỏng ghi token
+        logger.warning("Không siết được ACL trên '%s': %s", path, e)
 
 
 def _parse_verify_tls(raw: str) -> Union[bool, str]:

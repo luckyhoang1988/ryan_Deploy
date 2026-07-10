@@ -1,4 +1,5 @@
 import hashlib
+import os
 import subprocess
 import time
 from unittest.mock import Mock
@@ -57,6 +58,39 @@ def test_payload_downloaded_and_substituted_into_command():
     assert outcome.exit_code == 0
     assert outcome.stdout.strip() == content.decode()
     client.download_to.assert_called_once()
+
+
+def test_payload_absolute_filename_confined_to_workdir(tmp_path):
+    """filename tuyệt đối từ server không được thoát khỏi workdir (os.path.join bỏ qua
+    workdir khi tham số sau là đường dẫn tuyệt đối — phải basename trước khi join)."""
+    content = b"payload content"
+    sha = hashlib.sha256(content).hexdigest()
+    captured_dest = {}
+
+    def fake_download(url, dest_path):
+        captured_dest["path"] = dest_path
+        with open(dest_path, "wb") as fh:
+            fh.write(content)
+        return None
+
+    client = Mock(spec=AgentClient)
+    client.download_to.side_effect = fake_download
+
+    outside = tmp_path / "outside.exe"
+    job = {
+        "command": "cmd /c type {file}",
+        "success_exit_codes": [0],
+        "payload": {
+            "download_url": "https://x/download",
+            "filename": str(outside),  # đường dẫn tuyệt đối, mô phỏng payload độc hại
+            "sha256": sha,
+        },
+    }
+    outcome = run_job(client, job, JOB_TIMEOUT)
+    assert outcome.exit_code == 0
+    assert not outside.exists()  # KHÔNG được ghi ra ngoài workdir
+    assert captured_dest["path"] != str(outside)
+    assert os.path.basename(captured_dest["path"]) == os.path.basename(str(outside))
 
 
 def test_payload_sha256_mismatch_refuses_to_run():
