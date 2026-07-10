@@ -583,11 +583,33 @@ def test_enroll_rejects_max_uses_exhausted(db):
         enroll_machine(raw_secret, m2.hostname)
 
 
-def test_enroll_rejects_machine_already_has_active_token(agent_machine):
+def test_enroll_rejects_machine_already_has_active_token_while_online(agent_machine):
     issue_token(agent_machine)  # máy đã có token active từ trước (vd cấp thủ công)
+    agent_machine.is_online = True  # agent thật đang giữ token này, đang heartbeat bình thường
+    agent_machine.save(update_fields=["is_online"])
     raw_secret, _ = issue_enrollment_secret("", _future())
     with pytest.raises(EnrollmentError, match="đã có token agent đang hoạt động"):
         enroll_machine(raw_secret, agent_machine.hostname)
+
+
+def test_enroll_auto_revokes_stale_token_when_machine_offline(agent_machine):
+    # Máy offline (mark_stale_machines_offline đã đánh False do hết heartbeat) nhưng vẫn còn 1
+    # token active — nghi agent mất token cục bộ, không phải bị agent khác chiếm. enroll_machine
+    # phải tự thu hồi token cũ và cấp token mới thay vì kẹt vòng lặp enroll vô hạn.
+    assert agent_machine.is_online is False
+    old_raw = issue_token(agent_machine)
+    old_token = AgentToken.objects.get(machine=agent_machine)
+    raw_secret, _ = issue_enrollment_secret("", _future())
+
+    new_raw, machine = enroll_machine(raw_secret, agent_machine.hostname)
+
+    assert machine.pk == agent_machine.pk
+    assert new_raw != old_raw
+    old_token.refresh_from_db()
+    assert old_token.revoked_at is not None
+    active = AgentToken.objects.filter(machine=agent_machine, revoked_at__isnull=True)
+    assert active.count() == 1
+    assert active.first().token_hash == hash_token(new_raw)
 
 
 def test_enroll_succeeds_with_never_expiring_secret(agent_machine):

@@ -1,6 +1,9 @@
 import hashlib
+import subprocess
+import time
 from unittest.mock import Mock
 
+from ryandeploy_agent import executor as executor_module
 from ryandeploy_agent.client import AgentClient, ApiError
 from ryandeploy_agent.executor import run_job
 
@@ -124,6 +127,37 @@ def test_verify_not_run_when_command_failed():
     outcome = run_job(client, job, JOB_TIMEOUT)
     assert outcome.verify_passed is None
     client.download_to.assert_not_called()
+
+
+def test_command_timeout_returns_promptly_not_hung():
+    # ping -n 31 127.0.0.1 chạy khoảng 30s nếu không bị dọn — job_timeout=1 phải khiến
+    # _run_command trả về NGAY (kill cả cây tiến trình), không đợi tới hết 30s.
+    start = time.monotonic()
+    exit_code, _stdout, error = executor_module._run_command(
+        "ping -n 31 127.0.0.1 >nul", ".", 1,
+    )
+    elapsed = time.monotonic() - start
+    assert exit_code is None
+    assert "Timeout" in error
+    assert elapsed < 15, f"đáng lẽ trả về trong vài giây (đã dọn cây tiến trình), thực tế {elapsed}s"
+
+
+def test_command_timeout_invokes_kill_process_tree(monkeypatch):
+    killed_pids = []
+    monkeypatch.setattr(executor_module, "_kill_process_tree", killed_pids.append)
+    try:
+        exit_code, _stdout, error = executor_module._run_command(
+            "ping -n 31 127.0.0.1 >nul", ".", 1,
+        )
+        assert exit_code is None
+        assert "Timeout" in error
+        assert len(killed_pids) == 1
+    finally:
+        # _kill_process_tree bị no-op hoá ở trên — tự dọn tiến trình ping thật để không sót lại.
+        if killed_pids:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(killed_pids[0])], capture_output=True,
+            )
 
 
 def test_verify_download_error_returns_none_not_false():

@@ -14,6 +14,41 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-10 — enroll_machine reject cứng "còn token active" gây deadlock enroll vô hạn khi agent mất token cục bộ; agent subprocess.run(shell=True, timeout=) treo vĩnh viễn trên Windows nếu installer sinh tiến trình cháu
+**Bối cảnh:** Điều tra ZP-IT006 "hay mất kết nối" — SSH vào prod, đọc DB/log thật thay vì đoán,
+phát hiện 2 lỗi độc lập cùng ngày. (1) `enroll_machine()` (`backend/apps/agents/services.py`)
+từ chối cứng re-enroll nếu `AgentToken` active đã tồn tại — đúng cho trường hợp bị chiếm, nhưng
+sai cho trường hợp agent tự mất token cục bộ (crash/mất ProgramData) rồi tự động re-enroll qua
+`enrollment_secret` (`poll_loop.py::_recover_auth`): server luôn từ chối, agent lặp lại backoff
+tới 300s **mãi mãi**, chỉ hết khi admin revoke tay — đã xảy ra 2 lần trong 1 ngày cho cùng 1 máy
+(audit log ghi rõ lần đầu phải revoke thủ công). (2) `agent/ryandeploy_agent/executor.py::_run_command`
+dùng `subprocess.run(shell=True, timeout=..., capture_output=True)` — trên Windows, khi timeout,
+Python chỉ `kill()` được tiến trình con trực tiếp (cmd.exe), KHÔNG kill được tiến trình cháu mà
+installer tự tách ra; cháu vẫn giữ handle pipe stdout/stderr mở khiến `communicate()` nội bộ gọi
+lại NGAY SAU kill() treo vĩnh viễn chờ EOF không bao giờ tới — toàn bộ thread duy nhất của agent
+(heartbeat+poll+execute dùng chung 1 thread) chết cứng, agent offline vĩnh viễn dù `job_timeout`
+đã cấu hình.
+**Bài học:**
+1. Một EnrollmentError "reject cứng vì đã có tài nguyên active" cần phân biệt "tài nguyên đó có
+   đang thực sự sống hay không" trước khi chặn tuyệt đối — dùng tín hiệu độc lập đã có sẵn
+   (`Machine.is_online`, do watchdog `mark_stale_machines_offline` tự set False khi hết hạn
+   heartbeat) làm điều kiện gate thay vì chỉ check "tồn tại token active". `is_online=False` ⇒
+   token cũ nhiều khả năng đã chết cục bộ, an toàn tự thu hồi+cấp lại; `is_online=True` ⇒ giữ
+   nguyên reject (vẫn còn 1 agent thật đang sống giữ token đó).
+2. `subprocess.run(..., timeout=N)` trên Windows KHÔNG đảm bảo tiến trình con của tiến trình con
+   bị dọn khi timeout — chỉ đúng với process tree phẳng (không tự spawn cháu/relaunch). Muốn
+   timeout thật sự đáng tin với các lệnh có thể spawn cháu (đặc biệt installer .exe tự relaunch
+   elevated), phải tự kill cả process tree (VD `taskkill /T /F /PID`), không dựa vào
+   `Popen.kill()`/`subprocess.run(timeout=)` mặc định.
+**Áp dụng:** Khi thấy 1 EnrollmentError/PermissionError "reject vì tài nguyên đã tồn tại" mà
+tài nguyên đó do 1 tiến trình nền có thể chết âm thầm sở hữu — tìm tín hiệu "còn sống hay không"
+độc lập đã có sẵn trong model (đừng thêm field mới nếu đã có) để gate auto-remediation an toàn.
+Bất kỳ agent nào chạy job/lệnh dài với `timeout=` trên Windows qua `subprocess` — audit lại xem
+lệnh có khả năng spawn tiến trình cháu không; nếu có, phải kill cả cây tiến trình khi timeout,
+không tin `subprocess.run(timeout=)` tự dọn sạch.
+
+---
+
 ## 2026-07-09 — purge_all CASCADE giết token → agent 401 vĩnh viễn nếu không còn enrollment_secret
 **Bối cảnh:** Prod báo 0 máy online dù agent đã cài. Log: heartbeat/poll 401 liên tục từ
 `10.0.193.251`. Timeline nginx: heartbeat 200 tới 14:09 → 401 từ 14:16; `purge_all` force

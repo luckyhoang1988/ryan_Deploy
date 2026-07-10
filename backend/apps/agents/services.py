@@ -110,7 +110,20 @@ def enroll_machine(secret_raw: str, hostname: str, source_ip: str = "") -> tuple
         if not _ou_in_scope(machine.ad_ou, secret.ad_ou):
             raise EnrollmentError("Máy không thuộc phạm vi OU của secret này.")
         if AgentToken.objects.filter(machine=machine, revoked_at__isnull=True).exists():
-            raise EnrollmentError("Máy đã có token agent đang hoạt động — cần thu hồi trước khi enroll lại.")
+            if machine.is_online:
+                raise EnrollmentError("Máy đã có token agent đang hoạt động — cần thu hồi trước khi enroll lại.")
+            # Máy đang offline (server không nhận heartbeat quá hạn — mark_stale_machines_offline
+            # đã tự đánh False) trong khi vẫn còn 1 token active: token cũ nhiều khả năng đã chết
+            # cục bộ trên máy đích (agent mất token, service crash, ProgramData bị xoá...), không
+            # phải bị "chiếm" bởi 1 agent khác đang thực sự chạy — is_online=True mới là tín hiệu
+            # có 1 agent sống đang giữ token đó. Tự thu hồi token cũ để agent thật tự phục hồi
+            # được qua enrollment_secret, tránh deadlock enroll lặp vô hạn (đã xảy ra 2 lần trong
+            # ngày 2026-07-10 cho ZP-IT006, phải revoke tay mới gỡ được — xem LESSONS.md).
+            logger.warning(
+                "Agent enroll: hostname=%s đang offline nhưng còn token active — tự thu hồi token "
+                "cũ để cấp lại (nghi máy mất token cục bộ).", hostname,
+            )
+            revoke_token(machine)
 
         logger.info(
             "Agent enroll: hostname=%s ip=%s secret_prefix=%s",

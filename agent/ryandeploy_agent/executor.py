@@ -19,6 +19,10 @@ from .client import AgentClient, ApiError
 logger = logging.getLogger("ryandeploy_agent.executor")
 
 _HASH_CHUNK_SIZE = 1024 * 256
+# Thời gian chờ thêm sau khi đã taskkill /T /F — dọn cả cây tiến trình thường xong gần như
+# ngay, số này chỉ là lưới an toàn cuối cùng để _run_command KHÔNG BAO GIỜ treo vô hạn dù
+# taskkill tự nó có trục trặc (xem _kill_process_tree).
+_KILL_GRACE_SECONDS = 10
 
 
 @dataclasses.dataclass
@@ -96,18 +100,46 @@ def _sha256_file(path: str) -> str:
 
 def _run_command(command: str, cwd: str, timeout: int):
     """Chạy 1 lệnh shell, trả (exit_code hoặc None, stdout gộp stderr, error).
-    exit_code=None nghĩa là lệnh không chạy tới nơi (timeout/OSError)."""
+    exit_code=None nghĩa là lệnh không chạy tới nơi (timeout/OSError).
+
+    Dùng Popen (không subprocess.run) để khi timeout có thể tự kill CẢ CÂY tiến trình —
+    trên Windows, Popen.kill()/subprocess.run(timeout=) mặc định chỉ diệt đúng tiến trình
+    con trực tiếp (cmd.exe), để lại tiến trình cháu mà installer tự tách/relaunch (rất phổ
+    biến: MSI wrapper, installer tự nâng quyền rồi respawn) sống, vẫn giữ handle
+    stdout/stderr — communicate() nội bộ mà subprocess.run gọi lại NGAY SAU kill() sẽ treo
+    vĩnh viễn chờ EOF không bao giờ tới, kéo theo cả agent (heartbeat+poll+execute dùng
+    chung 1 thread) chết cứng vô thời hạn dù đã cấu hình job_timeout (xem LESSONS.md
+    2026-07-10)."""
     try:
-        proc = subprocess.run(
-            command, shell=True, cwd=cwd, timeout=timeout,
-            capture_output=True, text=True, errors="ignore",
+        proc = subprocess.Popen(
+            command, shell=True, cwd=cwd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="ignore",
         )
-        stdout = (proc.stdout or "") + (proc.stderr or "")
-        return proc.returncode, stdout, ""
-    except subprocess.TimeoutExpired:
-        return None, "", f"Timeout sau {timeout}s — lệnh chưa hoàn tất"
     except OSError as e:
         return None, "", f"Không chạy được lệnh: {e}"
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, (stdout or "") + (stderr or ""), ""
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc.pid)
+        try:
+            stdout, stderr = proc.communicate(timeout=_KILL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        return None, (stdout or "") + (stderr or ""), f"Timeout sau {timeout}s — lệnh chưa hoàn tất (đã dọn cả cây tiến trình)"
+
+
+def _kill_process_tree(pid: int) -> None:
+    """taskkill /T diệt cả tiến trình cháu bên dưới `pid` (không chỉ chính `pid`) — xem
+    docstring `_run_command` để biết lý do không dùng Popen.kill()."""
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True, timeout=_KILL_GRACE_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.warning("taskkill /T /F /PID %s lỗi: %s", pid, e)
 
 
 def _run_verify(client: AgentClient, verify: dict, workdir: str, timeout: int) -> Optional[bool]:
