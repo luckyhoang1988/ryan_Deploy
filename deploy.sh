@@ -13,8 +13,10 @@
 #   1. Build frontend (npm run build).
 #   2. Sync backend source (tar-over-ssh, loại cache/media/staticfiles/venv).
 #   3. Swap frontend dist qua thư mục tạm (giữ dist.old để rollback).
-#   4. Rebuild + restart container (web tự migrate + collectstatic khi start).
-#   5. Verify: container healthy + HTTPS 200.
+#   4. Sync docker-compose.prod.yml lên server (docker-compose.host.yml chỉ tồn tại
+#      trên server, không sync — sửa file đó thì tự scp riêng).
+#   5. Rebuild + restart container (web tự migrate + collectstatic khi start).
+#   6. Verify: container healthy + HTTPS 200.
 #
 set -euo pipefail
 
@@ -70,12 +72,17 @@ ssh "$SSH_HOST" "
 "
 ok "Frontend dist đã swap (giữ dist.old để rollback)"
 
-# ── 4. Rebuild + restart ──────────────────────────────────────────────────
+# ── 4. Sync docker-compose.prod.yml ───────────────────────────────────────
+log "Sync docker-compose.prod.yml → $REMOTE_ROOT"
+scp docker-compose.prod.yml "$SSH_HOST:$REMOTE_ROOT/docker-compose.prod.yml"
+ok "docker-compose.prod.yml đã sync"
+
+# ── 5. Rebuild + restart ──────────────────────────────────────────────────
 log "Rebuild + restart container (web tự migrate + collectstatic)"
 ssh "$SSH_HOST" "cd $REMOTE_ROOT && $COMPOSE up -d --build"
 ok "Container đã rebuild"
 
-# ── 5. Verify ─────────────────────────────────────────────────────────────
+# ── 6. Verify ─────────────────────────────────────────────────────────────
 log "Kiểm tra trạng thái container"
 ssh "$SSH_HOST" "cd $REMOTE_ROOT && $COMPOSE ps"
 
