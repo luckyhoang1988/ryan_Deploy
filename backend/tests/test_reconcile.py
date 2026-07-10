@@ -1,7 +1,8 @@
 """
 reconcile_stuck_deployments phải tự phát hiện job "ma" kẹt RUNNING sau worker crash
 (acks_late redeliver thấy claim fail, coi là "đã xử lý" rồi return êm — không ai từng ghi
-FAILED cho job đó) và đánh FAILED, thay vì bỏ qua deployment vô thời hạn.
+FAILED cho job đó) và đánh FAILED, thay vì bỏ qua deployment vô thời hạn. Job SMB stale
+còn phải best-effort cleanup_now (service/file tạm có thể còn trên máy đích).
 """
 from datetime import timedelta
 
@@ -21,6 +22,18 @@ def _no_redis(monkeypatch):
     # Không phụ thuộc Redis thật trong test — chỉ cần biết release_slot có được gọi không.
     calls = []
     monkeypatch.setattr("apps.deployments.semaphore.release_slot", lambda dep_id: calls.append(dep_id))
+    return calls
+
+
+@pytest.fixture(autouse=True)
+def _stub_cleanup(monkeypatch):
+    # Không kết nối SMB thật khi watchdog dọn residue — chỉ ghi lại lời gọi.
+    calls = []
+
+    def fake_cleanup(job, machine, credential, job_token):
+        calls.append({"job_id": job.pk, "hostname": machine.hostname, "job_token": job_token})
+
+    monkeypatch.setattr("apps.jobs.tasks._cleanup_target_residue", fake_cleanup)
     return calls
 
 
@@ -53,8 +66,8 @@ def test_fresh_running_job_is_untouched(deployment):
     assert deployment.status == DeploymentStatus.RUNNING
 
 
-def test_stale_running_job_marked_failed_and_deployment_finalized(deployment, _no_redis):
-    m1 = Machine.objects.create(hostname="PC-1")
+def test_stale_running_job_marked_failed_and_deployment_finalized(deployment, _no_redis, _stub_cleanup):
+    m1 = Machine.objects.create(hostname="PC-1")  # mặc định connection_mode=smb
     m2 = Machine.objects.create(hostname="PC-2")
     stale_job = Job.objects.create(
         deployment=deployment, machine=m1, status=JobStatus.RUNNING,
@@ -72,6 +85,25 @@ def test_stale_running_job_marked_failed_and_deployment_finalized(deployment, _n
     assert result["stale_jobs_failed"] == 1
     assert result["reconciled"] == 1
     assert deployment.id in _no_redis  # release_slot đã được gọi cho job kẹt
+    assert _stub_cleanup == [
+        {"job_id": stale_job.pk, "hostname": "PC-1", "job_token": f"job{stale_job.pk}"},
+    ]
+
+
+def test_stale_agent_job_marked_failed_without_smb_cleanup(deployment, _stub_cleanup):
+    """Máy agent không dùng PushExecutor — watchdog không gọi cleanup SMB."""
+    m = Machine.objects.create(hostname="AGENT-1", connection_mode=ConnectionMode.AGENT)
+    stale_job = Job.objects.create(
+        deployment=deployment, machine=m, status=JobStatus.RUNNING,
+        started_at=timezone.now() - timedelta(hours=1),
+    )
+
+    result = reconcile_stuck_deployments()
+
+    stale_job.refresh_from_db()
+    assert stale_job.status == JobStatus.FAILED
+    assert result["stale_jobs_failed"] == 1
+    assert _stub_cleanup == []
 
 
 def test_agent_job_queued_past_timeout_marked_failed(deployment, settings):

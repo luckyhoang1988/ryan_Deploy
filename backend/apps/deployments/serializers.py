@@ -1,5 +1,8 @@
 from rest_framework import serializers
 
+from apps.machines.models import ConnectionMode
+from apps.packages.models import InstallerType
+
 from .models import (
     PACKAGE_ACTIONS,
     Deployment,
@@ -13,11 +16,16 @@ def _validate_package_action(action, pv, errors_key="package_version"):
     """
     Dùng chung cho Deployment & DeploymentSchedule: install/uninstall bắt buộc có
     package_version; reboot/shutdown/inventory thì KHÔNG được gắn.
+    Chỉ cho phép version đã duyệt (approved) — tránh deploy bản chờ review.
     """
     if action in PACKAGE_ACTIONS:
         if pv is None:
             raise serializers.ValidationError(
                 {errors_key: f"Action '{action}' cần chọn một package version."}
+            )
+        if not pv.approved:
+            raise serializers.ValidationError(
+                {errors_key: "Version chưa được duyệt — không thể đưa vào deployment."}
             )
         if action == DeploymentAction.UNINSTALL and not (pv.uninstall_command or "").strip():
             raise serializers.ValidationError(
@@ -26,6 +34,25 @@ def _validate_package_action(action, pv, errors_key="package_version"):
     elif pv is not None:
         raise serializers.ValidationError(
             {errors_key: f"Action '{action}' không được gắn package version."}
+        )
+
+
+def _validate_agent_zip_targets(pv, machines, errors_key="target_machines"):
+    """Agent v1 chưa giải nén .zip — chặn sớm lúc tạo/sửa thay vì fail lúc poll."""
+    if pv is None or pv.installer_type != InstallerType.ZIP:
+        return
+    agent_hosts = [
+        m.hostname for m in machines if getattr(m, "connection_mode", None) == ConnectionMode.AGENT
+    ]
+    if agent_hosts:
+        raise serializers.ValidationError(
+            {
+                errors_key: (
+                    "Package .zip chưa hỗ trợ qua agent (v1). Đổi các máy sau về "
+                    f"connection_mode='smb' hoặc bỏ khỏi target: {', '.join(agent_hosts[:10])}"
+                    + ("…" if len(agent_hosts) > 10 else "")
+                )
+            }
         )
 
 
@@ -94,6 +121,15 @@ class DeploymentSerializer(serializers.ModelSerializer):
         # package_version có thể vắng trong attrs (partial); lấy từ instance làm fallback.
         pv = attrs.get("package_version", getattr(self.instance, "package_version", None))
         _validate_package_action(action, pv)
+        # target_machines: PrimaryKeyRelatedField đã resolve thành list Machine trong attrs;
+        # partial update không gửi field → lấy từ instance.
+        if "target_machines" in attrs:
+            machines = attrs["target_machines"]
+        elif self.instance is not None:
+            machines = list(self.instance.target_machines.all())
+        else:
+            machines = []
+        _validate_agent_zip_targets(pv, machines)
         return attrs
 
     def create(self, validated_data):
@@ -135,6 +171,13 @@ class DeploymentScheduleSerializer(serializers.ModelSerializer):
         action = attrs.get("action") or getattr(self.instance, "action", DeploymentAction.INSTALL)
         pv = attrs.get("package_version", getattr(self.instance, "package_version", None))
         _validate_package_action(action, pv)
+        if "target_machines" in attrs:
+            machines = attrs["target_machines"]
+        elif self.instance is not None:
+            machines = list(self.instance.target_machines.all())
+        else:
+            machines = []
+        _validate_agent_zip_targets(pv, machines)
 
         recurrence_type = attrs.get(
             "recurrence_type", getattr(self.instance, "recurrence_type", None)

@@ -11,7 +11,7 @@ from apps.credentials.models import DeployCredential
 from apps.deployments.actions import REBOOT_COMMAND, SHUTDOWN_COMMAND, build_action_plan
 from apps.deployments.models import Deployment, DeploymentAction
 from apps.deployments.serializers import DeploymentSerializer
-from apps.machines.models import Machine
+from apps.machines.models import ConnectionMode, Machine
 from apps.packages.models import InstallerType, Package, PackageVersion
 
 
@@ -154,6 +154,30 @@ def test_uninstall_requires_uninstall_command(credential, machine):
 def test_uninstall_valid_with_uninstall_command(credential, machine):
     pv = _pv(uninstall_command="msiexec /x {12345} /qn")
     s = _serializer(credential, machine, action="uninstall", package_version=pv.id)
+    assert s.is_valid(), s.errors
+
+
+def test_install_rejects_unapproved_package_version(credential, machine):
+    pv = _pv(approved=False)
+    s = _serializer(credential, machine, action="install", package_version=pv.id)
+    assert not s.is_valid()
+    assert "package_version" in s.errors
+    assert "duyệt" in str(s.errors["package_version"]).lower()
+
+
+def test_install_zip_rejects_agent_target(credential, machine):
+    agent = Machine.objects.create(hostname="AGENT-1", connection_mode=ConnectionMode.AGENT)
+    pv = _pv(installer_type=InstallerType.ZIP, installer_file="repository/x/1/src.zip")
+    s = _serializer(credential, agent, action="install", package_version=pv.id)
+    assert not s.is_valid()
+    assert "target_machines" in s.errors
+    assert "zip" in str(s.errors["target_machines"]).lower()
+
+
+def test_install_zip_allows_smb_target(credential, machine):
+    # machine fixture mặc định connection_mode=smb
+    pv = _pv(installer_type=InstallerType.ZIP, installer_file="repository/x/1/src.zip")
+    s = _serializer(credential, machine, action="install", package_version=pv.id)
     assert s.is_valid(), s.errors
 
 

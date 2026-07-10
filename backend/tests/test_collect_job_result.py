@@ -154,9 +154,10 @@ def test_cancel_during_collect_cleans_up_target_and_releases_slot_once(credentia
     assert _patch == [job.deployment_id]
 
 
-def test_timeout_marks_job_failed_without_retrying_forever(credential, _patch, settings):
+def test_timeout_marks_job_failed_and_cleans_up_target(credential, _patch, settings):
     # JOB_TIMEOUT cực nhỏ để deadline bị vượt ngay ở lần poll đầu tiên (None) — tránh test
     # phải chờ deadline thật (mặc định 1800s) như đã cảnh báo ở đầu file.
+    # Timeout = không đọc được exit.code → phải cleanup_now (giống cancel giữa collect).
     settings.RYANDEPLOY = {**settings.RYANDEPLOY, "JOB_TIMEOUT": 0}
     job = _job(credential)
     _FakeExecutor.poll_results = [None]
@@ -166,4 +167,5 @@ def test_timeout_marks_job_failed_without_retrying_forever(credential, _patch, s
     job.refresh_from_db()
     assert job.status == JobStatus.FAILED
     assert "timeout" in job.error_output.lower()
+    assert _FakeExecutor.cleanup_now_calls == [f"job{job.pk}"]
     assert _patch == [job.deployment_id]

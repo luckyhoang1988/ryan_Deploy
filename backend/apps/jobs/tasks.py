@@ -310,7 +310,7 @@ def collect_job_result(self, job_id: int):
     if is_cancelled():
         # Máy đích vẫn còn service/file tạm từ start() (chưa từng đọc được exit.code nên
         # chưa ai cleanup) — phải dọn ngay vì sẽ không còn lần poll nào nữa cho job_token này.
-        _cleanup_cancelled_target(job, machine, credential, job_token)
+        _cleanup_target_residue(job, machine, credential, job_token)
         release_slot(deployment.id)
         logger.info("Job %s bị hủy trong lúc collect — dừng, đã dọn máy đích", job_id)
         return {"job_id": job_id, "status": "cancelled"}
@@ -349,6 +349,9 @@ def collect_job_result(self, job_id: int):
     if result is None:
         deadline = job.started_at + timedelta(seconds=_job_timeout())
         if timezone.now() >= deadline:
+            # Timeout = không bao giờ đọc được exit.code → poll_once không tự dọn service/
+            # file tạm trên máy đích. Dọn trước khi nhả slot (cùng lý do như nhánh cancel).
+            _cleanup_target_residue(job, machine, credential, job_token)
             _write_job_result(
                 job,
                 status=JobStatus.FAILED,
@@ -431,10 +434,10 @@ def collect_job_result(self, job_id: int):
     return {"job_id": job_id, "status": "failed", "error": result.error}
 
 
-def _cleanup_cancelled_target(job, machine, credential, job_token):
-    """Job bị hủy giữa lúc đang collect — máy đích vẫn còn service/file tạm từ start(), dọn
-    ngay vì sẽ không còn ai poll job_token này nữa. Lỗi cleanup chỉ log, không chặn việc trả
-    'cancelled' (giống mọi lỗi cleanup khác trong PushExecutor)."""
+def _cleanup_target_residue(job, machine, credential, job_token):
+    """Dọn service/file tạm trên máy đích SMB khi job kết thúc mà không đi qua poll_once
+    (đã đọc exit.code → tự cleanup): cancel giữa collect, collect timeout, hoặc watchdog
+    đánh stale RUNNING. Lỗi cleanup chỉ log — không chặn ghi trạng thái terminal của job."""
     try:
         cred_password = credential.get_password()
     except Exception as e:  # noqa: BLE001

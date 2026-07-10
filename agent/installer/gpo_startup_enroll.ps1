@@ -33,12 +33,22 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$EnrollmentSecret,
 
-    [ValidateSet("true", "false")]
+    # "true"/"false", hoặc đường dẫn tới file CA bundle (.pem) để verify chứng chỉ tự ký của
+    # server — xem ryandeploy_agent/config.py::_parse_verify_tls.
     [string]$VerifyTls = "true",
 
     # Chỉ dùng khi test thủ công (trỏ ra thư mục tạm) — GPO thật KHÔNG truyền tham số này,
     # để dùng đúng đường dẫn DEFAULT_CONFIG_PATH mà ryandeploy_agent/config.py đọc.
-    [string]$ProgramDataDir = "C:\ProgramData\RyanDeployAgent"
+    [string]$ProgramDataDir = "C:\ProgramData\RyanDeployAgent",
+
+    # ⚠️ Bỏ qua CẢ HAI guard bên dưới (token thật đã có / nội dung đã khớp) và LUÔN ghi đè
+    # agent.ini + restart service. Dùng cho remediation: build lại MSI với secret đúng rồi cài
+    # lại lên các máy đang kẹt secret sai (chưa từng enroll thành công → không có token thật, an
+    # toàn để ghi đè). KHÔNG bật cờ này cho rollout thường — nếu máy đã có token thật đang hoạt
+    # động, ghi đè sẽ xóa secret khỏi agent.ini cục bộ trong khi server vẫn giữ token cũ, và máy
+    # sẽ không tự enroll lại được (server từ chối "đã có token đang hoạt động") cho tới khi admin
+    # revoke token cũ thủ công.
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -74,9 +84,12 @@ function Main {
     New-Item -ItemType Directory -Force -Path $ProgramDataDir | Out-Null
 
     $existingToken = Get-ExistingToken -Path $IniPath
-    if ($existingToken) {
+    if ($existingToken -and -not $Force) {
         Write-Log "agent.ini đã có token thật (đã enroll trước đó) — bỏ qua, KHÔNG ghi đè."
         return
+    }
+    if ($existingToken -and $Force) {
+        Write-Log "⚠️ -Force: agent.ini có token thật nhưng vẫn ghi đè theo yêu cầu — token cũ (prefix ẩn) sẽ mất tác dụng cục bộ, cần revoke phía server nếu máy không tự enroll lại được."
     }
 
     $newContent = @(
@@ -87,13 +100,14 @@ function Main {
     ) -join "`r`n"
 
     $existing = if (Test-Path $IniPath) { Get-Content -Path $IniPath -Raw -ErrorAction SilentlyContinue } else { $null }
-    if ($existing -and ($existing.Trim() -eq $newContent.Trim())) {
+    if ((-not $Force) -and $existing -and ($existing.Trim() -eq $newContent.Trim())) {
         Write-Log "agent.ini đã đúng enrollment_secret hiện tại — không ghi lại."
         return
     }
 
     Set-Content -Path $IniPath -Value $newContent -Encoding ASCII
-    Write-Log "Đã ghi agent.ini với enrollment_secret cho '$($env:COMPUTERNAME)' (server_url=$ServerUrl)."
+    $forceNote = if ($Force) { " [Force]" } else { "" }
+    Write-Log "Đã ghi agent.ini với enrollment_secret cho '$($env:COMPUTERNAME)' (server_url=$ServerUrl)$forceNote."
 
     try {
         $svc = Get-Service -Name "RyanDeployAgent" -ErrorAction SilentlyContinue

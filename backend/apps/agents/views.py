@@ -158,6 +158,13 @@ class AgentJobReportView(_AgentAPIView):
         from apps.deployments.semaphore import release_slot
 
         machine = request.agent_machine
+        if machine.connection_mode != ConnectionMode.AGENT:
+            # Đồng bộ với poll: admin rollback về SMB giữa lúc agent đang chạy → không nhận
+            # report (tránh ghi đè kết quả / race với đường SMB). Agent sẽ thấy 409 và dừng.
+            return Response(
+                {"detail": "Máy không còn ở connection_mode=agent — từ chối report."},
+                status=status.HTTP_409_CONFLICT,
+            )
         try:
             job = Job.objects.select_related("deployment", "deployment__package_version").get(
                 pk=job_id, machine=machine,
@@ -308,5 +315,8 @@ class AgentEnrollView(APIView):
             logger.warning("Enroll thất bại (hostname=%s, ip=%s): %s", hostname, source_ip, e)
             return Response({"detail": str(e)}, status=status.HTTP_403_FORBIDDEN)
 
-        AuditLog.record(AuditLog.Action.AGENT_ENROLL, target=machine, machine_hostname=machine.hostname)
+        AuditLog.record(
+            AuditLog.Action.AGENT_ENROLL, target=machine, machine_hostname=machine.hostname,
+            connection_mode=machine.connection_mode,
+        )
         return Response({"token": raw_token}, status=status.HTTP_201_CREATED)

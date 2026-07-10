@@ -84,7 +84,8 @@ def enroll_machine(secret_raw: str, hostname: str, source_ip: str = "") -> tuple
     trong 1 transaction) để chống race giữa 2 request cùng dùng chung secret hoặc cùng
     hostname. use_count chỉ tăng SAU KHI mọi điều kiện đã xác nhận sẽ enroll thành công.
     """
-    from apps.machines.models import Machine
+    from apps.jobs.models import Job, JobStatus
+    from apps.machines.models import ConnectionMode, Machine
 
     now = timezone.now()
     with transaction.atomic():
@@ -117,5 +118,23 @@ def enroll_machine(secret_raw: str, hostname: str, source_ip: str = "") -> tuple
         )
         EnrollmentSecret.objects.filter(pk=secret.pk).update(use_count=F("use_count") + 1)
         raw_token = issue_token(machine, user=None)
+
+        # Tự chuyển máy sang connection_mode=agent ngay khi enroll thành công — trước đây phải
+        # đợi admin gọi tay bulk-set-connection-mode (xem README.md §4), gây hiểu nhầm "cài agent
+        # xong sao vẫn kết nối SMB". Vẫn giữ chốt an toàn: bỏ qua nếu máy đang có job SMB
+        # QUEUED/RUNNING, để không đổi mode giữa chừng job đang chạy (cùng nguyên tắc với
+        # apps.machines.views._machines_with_active_jobs / bulk_set_connection_mode).
+        if machine.connection_mode != ConnectionMode.AGENT:
+            has_active_job = Job.objects.filter(
+                machine=machine, status__in=(JobStatus.QUEUED, JobStatus.RUNNING),
+            ).exists()
+            if not has_active_job:
+                Machine.objects.filter(pk=machine.pk).update(connection_mode=ConnectionMode.AGENT)
+                machine.connection_mode = ConnectionMode.AGENT
+            else:
+                logger.warning(
+                    "Enroll OK cho '%s' nhưng đang có job SMB active — giữ connection_mode=smb, "
+                    "cần admin tự chuyển sau khi job xong.", hostname,
+                )
 
     return raw_token, machine

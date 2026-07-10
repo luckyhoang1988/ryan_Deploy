@@ -340,6 +340,26 @@ def test_poll_ignores_job_when_machine_not_in_agent_mode(agent_machine, install_
     assert job.status == JobStatus.QUEUED  # không bị claim
 
 
+def test_report_rejects_when_machine_switched_to_smb(agent_machine, install_deployment):
+    """Agent đã claim job rồi admin rollback connection_mode → report phải 409, job giữ RUNNING."""
+    raw = issue_token(agent_machine)
+    client = APIClient()
+    poll = client.post("/api/agent/jobs/poll/", **_auth_header(raw)).json()["job"]
+    assert poll is not None
+
+    agent_machine.connection_mode = ConnectionMode.SMB
+    agent_machine.save(update_fields=["connection_mode"])
+
+    resp = client.post(
+        f"/api/agent/jobs/{poll['job_id']}/report/",
+        {"exit_code": 0, "stdout": "ok"},
+        format="json", **_auth_header(raw),
+    )
+    assert resp.status_code == 409
+    job = Job.objects.get(pk=poll["job_id"])
+    assert job.status == JobStatus.RUNNING  # không ghi đè kết quả
+
+
 # ---------------- MachineViewSet: provision/revoke/bulk-provision (admin-only) ----------------
 
 
@@ -437,6 +457,19 @@ def test_bulk_set_connection_mode_by_machine_ids_and_rollback(admin_client, db):
     assert resp2.status_code == 200
     m1.refresh_from_db()
     assert m1.connection_mode == ConnectionMode.SMB
+
+
+def test_bulk_set_connection_mode_blocked_when_active_job(admin_client, install_deployment, agent_machine):
+    # install_deployment đã tạo job QUEUED trên agent_machine — không cho đổi mode.
+    resp = admin_client.post(
+        "/api/machines/bulk-set-connection-mode/",
+        {"machine_ids": [agent_machine.pk], "connection_mode": "smb"},
+        content_type="application/json",
+    )
+    assert resp.status_code == 409
+    assert "QUEUED" in resp.json()["detail"] or "RUNNING" in resp.json()["detail"]
+    agent_machine.refresh_from_db()
+    assert agent_machine.connection_mode == ConnectionMode.AGENT  # không đổi
 
 
 def test_bulk_set_connection_mode_rejects_invalid_mode_and_missing_scope(admin_client, db):
@@ -585,6 +618,38 @@ def test_enroll_hostname_case_insensitive(db):
     raw_secret, _ = issue_enrollment_secret("", _future())
     _, enrolled = enroll_machine(raw_secret, "casesensitive-pc")
     assert enrolled.pk == machine.pk
+
+
+def test_enroll_auto_switches_connection_mode_to_agent(db):
+    machine = Machine.objects.create(hostname="AUTO-SWITCH-PC", enabled=True)
+    assert machine.connection_mode == ConnectionMode.SMB
+    raw_secret, _ = issue_enrollment_secret("", _future())
+
+    _, enrolled = enroll_machine(raw_secret, machine.hostname)
+
+    assert enrolled.connection_mode == ConnectionMode.AGENT
+    machine.refresh_from_db()
+    assert machine.connection_mode == ConnectionMode.AGENT
+
+
+def test_enroll_keeps_smb_when_active_job_exists(db, credential, package_version):
+    # Máy đang có job SMB QUEUED đúng lúc enroll — không được đổi connection_mode giữa chừng
+    # job, kể cả khi cấp token thành công (xem enroll_machine trong services.py).
+    machine = Machine.objects.create(hostname="BUSY-PC", enabled=True)
+    dep = Deployment.objects.create(
+        name="Deploy 7zip qua smb", action=DeploymentAction.INSTALL,
+        package_version=package_version, credential=credential,
+    )
+    dep.target_machines.add(machine)
+    Job.objects.create(deployment=dep, machine=machine, status=JobStatus.QUEUED)
+    raw_secret, _ = issue_enrollment_secret("", _future())
+
+    raw_token, enrolled = enroll_machine(raw_secret, machine.hostname)
+
+    assert AgentToken.objects.filter(machine=machine, token_hash=hash_token(raw_token)).exists()
+    assert enrolled.connection_mode == ConnectionMode.SMB
+    machine.refresh_from_db()
+    assert machine.connection_mode == ConnectionMode.SMB
 
 
 def test_enroll_race_simulated_via_monkeypatch(db):

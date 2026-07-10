@@ -89,7 +89,7 @@ def reconcile_stuck_deployments():
 
     from apps.deployments.semaphore import release_slot
     from apps.jobs.models import Job, JobStatus
-    from apps.jobs.tasks import _job_timeout, finalize_deployment
+    from apps.jobs.tasks import _cleanup_target_residue, _job_timeout, finalize_deployment
     from apps.machines.models import ConnectionMode
 
     # Job của máy connection_mode=agent ở QUEUED quá lâu mà agent chưa từng poll tới (agent
@@ -146,7 +146,11 @@ def reconcile_stuck_deployments():
         # claim fail (job không còn QUEUED) và coi là "đã xử lý", return êm mà không ai
         # từng ghi FAILED. Không có watchdog thì job này (và deployment chứa nó) kẹt
         # RUNNING vĩnh viễn — tự đánh FAILED nếu đã quá hạn rõ ràng trước khi xét terminal.
-        for job in jobs.filter(status=JobStatus.RUNNING, started_at__lt=stale_cutoff):
+        # select_related: cần machine.connection_mode + credential để dọn residue SMB (nếu có).
+        stale_qs = jobs.filter(status=JobStatus.RUNNING, started_at__lt=stale_cutoff).select_related(
+            "machine", "deployment__credential",
+        )
+        for job in stale_qs:
             updated = Job.objects.filter(pk=job.pk, status=JobStatus.RUNNING).update(
                 status=JobStatus.FAILED,
                 error_output=(
@@ -157,6 +161,12 @@ def reconcile_stuck_deployments():
             )
             if updated:
                 release_slot(dep_id)  # job có thể đang giữ slot semaphore, phải nhả
+                # SMB: start() có thể đã tạo service/file tạm mà không ai poll_once để dọn.
+                # Agent: không dùng PushExecutor — không có residue SMB cần dọn.
+                if job.machine.connection_mode == ConnectionMode.SMB and job.deployment.credential_id:
+                    _cleanup_target_residue(
+                        job, job.machine, job.deployment.credential, f"job{job.pk}",
+                    )
                 stale_jobs_failed += 1
                 logger.warning(
                     "Reconcile: job %s (deployment %s) kẹt RUNNING quá timeout → FAILED",

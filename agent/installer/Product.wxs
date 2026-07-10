@@ -16,6 +16,11 @@
   không cần GPO Startup Script hay thao tác thủ công nào thêm. Nếu ENROLLSECRET rỗng (mặc định),
   hành vi giữ nguyên như trước: agent.ini phải được rải bằng cách khác (GPO Startup Script theo
   OU, hoặc ghi tay) trước khi service chạy được.
+
+  -ForceOverwrite (build.ps1): thêm cờ -Force khi gọi gpo_startup_enroll.ps1, bỏ qua mọi guard
+  bảo vệ agent.ini hiện có (kể cả khi đã có token thật) và LUÔN ghi đè. Dùng cho remediation —
+  build lại MSI với secret ĐÚNG rồi cài đè lên các máy đang kẹt secret sai. Xem cảnh báo chi tiết
+  trong build.ps1/gpo_startup_enroll.ps1.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="*"
@@ -74,6 +79,7 @@
       <ComponentRef Id="AgentExeComponent" />
       <ComponentRef Id="ProgramDataFolderComponent" />
       <ComponentRef Id="EnrollScriptComponent" />
+      <ComponentRef Id="CaCertComponent" />
     </Feature>
 
     <!--
@@ -86,10 +92,17 @@
       của Windows Installer để đưa dữ liệu vào ngữ cảnh deferred/no-impersonation) — vì vậy CA
       "set property" bên dưới phải có Property="EnrollAgentCA", trùng Id của CA deferred.
     -->
+    <?if $(var.ForceOverwrite) != ""?>
     <CustomAction Id="SetEnrollAgentCA"
                   Property="EnrollAgentCA"
                   Execute="immediate"
-                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[#EnrollScript]&quot; -ServerUrl &quot;[SERVERURL]&quot; -EnrollmentSecret &quot;[ENROLLSECRET]&quot;" />
+                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[#EnrollScript]&quot; -ServerUrl &quot;[SERVERURL]&quot; -EnrollmentSecret &quot;[ENROLLSECRET]&quot; -VerifyTls &quot;[#CaCertFile]&quot; -Force" />
+    <?else?>
+    <CustomAction Id="SetEnrollAgentCA"
+                  Property="EnrollAgentCA"
+                  Execute="immediate"
+                  Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[#EnrollScript]&quot; -ServerUrl &quot;[SERVERURL]&quot; -EnrollmentSecret &quot;[ENROLLSECRET]&quot; -VerifyTls &quot;[#CaCertFile]&quot;" />
+    <?endif?>
     <CustomAction Id="EnrollAgentCA"
                   BinaryKey="WixCA"
                   DllEntry="CAQuietExec"
@@ -152,6 +165,19 @@
         -->
         <File Id="EnrollScript"
               Source="gpo_startup_enroll.ps1"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="CaCertComponent" Directory="INSTALLFOLDER" Guid="6E9B6E9E-6F3B-4B37-9B0B-3B7B7C2C1A3F">
+        <!--
+          Chứng chỉ tự ký (self-signed) của server, dùng làm CA bundle cho verify_tls trong
+          agent.ini thay vì tắt hẳn xác thực TLS (verify_tls=false). CustomAction EnrollAgentCA
+          truyền đường dẫn cài đặt thật ([#CaCertFile]) qua -VerifyTls. Luôn cài (kể cả khi
+          ENROLLSECRET rỗng) như EnrollScriptComponent — không dùng tới nếu CustomAction tắt.
+        -->
+        <File Id="CaCertFile"
+              Source="certs\ryandeploy.crt"
+              Name="ca.pem"
               KeyPath="yes" />
       </Component>
     </ComponentGroup>

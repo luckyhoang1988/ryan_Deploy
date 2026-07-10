@@ -25,7 +25,8 @@ param(
 
     [string]$TokenCsvPath = (Join-Path $PSScriptRoot "agent_tokens.csv"),
 
-    [ValidateSet("true", "false")]
+    # "true"/"false", hoặc đường dẫn tới file CA bundle (.pem) để verify chứng chỉ tự ký của
+    # server — xem ryandeploy_agent/config.py::_parse_verify_tls.
     [string]$VerifyTls = "true",
 
     # Chỉ dùng khi test thủ công (trỏ ra thư mục tạm) — GPO thật KHÔNG truyền tham số này,

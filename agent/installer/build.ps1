@@ -20,11 +20,19 @@ Sử dụng:
   # .msi build ra — chỉ phân phối MSI qua kênh nội bộ tin cậy, và revoke + build lại ngay nếu lộ.
   .\build.ps1 -EnrollSecret "<secret-vua-tao>"
   .\build.ps1 -EnrollSecret "<secret>" -ServerUrl "https://10.0.193.231"
+
+  # -ForceOverwrite: dùng khi cài LẠI MSI này lên các máy đã có agent.ini SAI (vd: secret build
+  # nhầm trước đó) để remediation — MSI sẽ luôn ghi đè agent.ini bằng ServerUrl/EnrollSecret mới,
+  # bất kể agent.ini hiện tại đang có gì. ⚠️ CHỈ dùng khi chắc chắn các máy đích CHƯA enroll thành
+  # công (chưa có token thật) — nếu máy đã có token thật đang hoạt động, ghi đè sẽ không giúp máy
+  # tự enroll lại được (server vẫn từ chối vì còn token cũ) cho tới khi admin revoke token đó.
+  .\build.ps1 -EnrollSecret "<secret-vua-tao>" -ForceOverwrite
 #>
 param(
     [string]$Version = "1.0.0.0",
     [string]$ServerUrl = "https://10.0.193.231",
-    [string]$EnrollSecret = ""
+    [string]$EnrollSecret = "",
+    [switch]$ForceOverwrite
 )
 
 $ErrorActionPreference = "Stop"
@@ -61,8 +69,12 @@ if ($EnrollSecret) {
 } else {
     Write-Host "EnrollSecret: (rỗng — giữ hành vi cũ, agent.ini phải rải bằng cách khác)"
 }
+$forceVar = if ($ForceOverwrite) { "1" } else { "" }
+if ($ForceOverwrite) {
+    Write-Warning "ForceOverwrite BẬT: MSI sẽ LUÔN ghi đè agent.ini kể cả khi máy đích đã có token thật. Chỉ dùng cho remediation trên các máy CHƯA enroll thành công."
+}
 
-& $candle -dProductVersion="$Version" -dServerUrl="$ServerUrl" -dEnrollSecret="$EnrollSecret" `
+& $candle -dProductVersion="$Version" -dServerUrl="$ServerUrl" -dEnrollSecret="$EnrollSecret" -dForceOverwrite="$forceVar" `
     -ext WixUtilExtension -out "$objDir\" -arch x64 (Join-Path $scriptDir "Product.wxs")
 if ($LASTEXITCODE -ne 0) { throw "candle.exe thất bại (exit $LASTEXITCODE)" }
 

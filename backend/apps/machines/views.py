@@ -16,6 +16,7 @@ from apps.agents.services import issue_enrollment_secret, issue_token, revoke_en
 from apps.audit.models import AuditLog
 from apps.core.permissions import IsAdmin, IsViewerOrAbove
 from apps.core.task_registry import remember_task_owner
+from apps.jobs.models import Job, JobStatus
 
 from .ad_sync import test_ad_connection
 from .models import ADConfig, ConnectionMode, Machine, MachineGroup
@@ -27,6 +28,15 @@ from .serializers import (
     MachineSerializer,
 )
 from .tasks import sync_from_ad
+
+# Job còn đang chờ/chạy — đổi connection_mode lúc này gây race SMB↔agent (job mồ côi
+# hoặc report/dispatch sai đường). Chỉ chặn khi đổi mode, không chặn sửa field khác.
+_ACTIVE_JOB_STATUSES = (JobStatus.QUEUED, JobStatus.RUNNING)
+
+
+def _machines_with_active_jobs(qs):
+    """Trả queryset máy trong qs còn job QUEUED/RUNNING."""
+    return qs.filter(jobs__status__in=_ACTIVE_JOB_STATUSES).distinct()
 
 
 class MachineViewSet(viewsets.ModelViewSet):
@@ -72,6 +82,20 @@ class MachineViewSet(viewsets.ModelViewSet):
         # Máy bị disable không còn agent heartbeat/mark_stale_machines_offline nào chạm tới
         # → is_online cũ sẽ đứng hình mãi mãi, sai lệch thống kê online/offline. Xóa ngay lúc tắt.
         was_enabled = serializer.instance.enabled
+        new_mode = serializer.validated_data.get("connection_mode")
+        if (
+            new_mode is not None
+            and new_mode != serializer.instance.connection_mode
+            and Job.objects.filter(
+                machine=serializer.instance, status__in=_ACTIVE_JOB_STATUSES
+            ).exists()
+        ):
+            from rest_framework.exceptions import ValidationError
+
+            raise ValidationError(
+                "Không thể đổi connection_mode khi máy còn job đang chờ/chạy "
+                "(QUEUED/RUNNING). Hủy hoặc chờ job xong rồi đổi."
+            )
         serializer.save()
         if was_enabled and not serializer.instance.enabled:
             serializer.instance.is_online = False
@@ -256,6 +280,25 @@ class MachineViewSet(viewsets.ModelViewSet):
         else:
             return Response(
                 {"detail": "Cần truyền machine_ids hoặc ad_ou."}, status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Chỉ chặn máy thực sự đổi mode và còn job active — máy đã đúng mode vẫn được
+        # "cập nhật" (no-op) để bulk theo OU không fail cả batch vì 1 máy đang deploy.
+        changing = qs.exclude(connection_mode=mode)
+        blocked = list(
+            _machines_with_active_jobs(changing).values_list("hostname", flat=True)[:20]
+        )
+        if blocked:
+            return Response(
+                {
+                    "detail": (
+                        "Không thể đổi connection_mode: các máy sau còn job QUEUED/RUNNING — "
+                        f"{', '.join(blocked)}"
+                        + ("…" if len(blocked) == 20 else "")
+                    ),
+                    "blocked_hostnames": blocked,
+                },
+                status=status.HTTP_409_CONFLICT,
             )
 
         updated = qs.update(connection_mode=mode)

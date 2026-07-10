@@ -56,13 +56,22 @@ def acquire_slot(deployment_id: int, limit: int, ttl: int) -> bool:
         return False
 
 
+# GET + DECR phải atomic: hai release đồng thời với GET-then-DECR cũ có thể cùng thấy
+# counter > 0 rồi cả hai DECR → counter âm → slot "ảo", vượt max_concurrency.
+_RELEASE_LUA = """
+local v = tonumber(redis.call('get', KEYS[1]) or '0')
+if v > 0 then
+  return redis.call('decr', KEYS[1])
+end
+return 0
+"""
+
+
 def release_slot(deployment_id: int) -> None:
-    """Trả lại 1 slot (guarded: không cho đếm xuống âm)."""
+    """Trả lại 1 slot (atomic, không cho đếm xuống âm)."""
     key = _key(deployment_id)
     try:
-        r = _redis()
-        if int(r.get(key) or 0) > 0:
-            r.decr(key)
+        _redis().eval(_RELEASE_LUA, 1, key)
     except redis.RedisError as e:
         logger.warning("Semaphore release lỗi Redis (bỏ qua): %s", e)
 

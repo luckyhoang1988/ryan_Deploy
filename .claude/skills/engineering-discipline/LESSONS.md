@@ -14,6 +14,57 @@ kỹ thuật. Mỗi bài học ngắn gọn, có bối cảnh + cách áp dụng
 
 ---
 
+## 2026-07-09 — purge_all CASCADE giết token → agent 401 vĩnh viễn nếu không còn enrollment_secret
+**Bối cảnh:** Prod báo 0 máy online dù agent đã cài. Log: heartbeat/poll 401 liên tục từ
+`10.0.193.251`. Timeline nginx: heartbeat 200 tới 14:09 → 401 từ 14:16; `purge_all` force
+200 lúc 14:19 (và lại lúc 14:32, 15:54). DB: 0 AgentToken, secret #2 hết hạn 2026-07-08.
+**Bài học:**
+1. `Machine` delete CASCADE `AgentToken` — purge/sync lại AD tạo Machine mới cùng hostname
+   nhưng token cũ trên đĩa client đã chết; agent chỉ tự re-enroll nếu `agent.ini` còn
+   `enrollment_secret` (token cấp tay qua UI thường không có secret → kẹt 401 mãi).
+2. Heartbeat 401 không kích hoạt `_recover_auth` — chỉ poll 401 mới đếm; khi debug “online”
+   phải xem cả poll 401 và có/không gọi `/enroll`.
+3. Gia hạn `EnrollmentSecret.expires_at=None` chỉ giúp máy còn secret trên đĩa; máy chỉ còn
+   token chết vẫn cần xóa dòng `token=` (hoặc cấp token mới) rồi restart service.
+**Áp dụng:** Trước purge_all force: backup/export token hoặc đảm bảo MSI/GPO còn secret.
+Khi 401 hàng loạt sau purge → kiểm tra `AgentToken.count()==0` và secret còn hạn trước,
+rồi sửa client `agent.ini` / provision lại — không chỉ nhìn UI online.
+
+---
+
+## 2026-07-09 — P1 harden: approved/zip-agent validate sớm; report+mode gate; release_slot Lua
+**Bối cảnh:** Sau P0 cleanup, vá cụm P1: deploy version chưa duyệt, agent+zip fail muộn lúc
+poll, AgentJobReportView không check connection_mode, bulk/PATCH đổi mode khi còn job active,
+`release_slot` GET-then-DECR TOCTOU.
+**Bài học:**
+1. Validate agent+zip phải đọc `target_machines` đã resolve (list Machine) trong serializer
+   `validate()`, kể cả partial update (fallback `instance.target_machines.all()`) — không chỉ
+   dựa vào poll-time fail.
+2. FakeRedis trong `test_semaphore.py` phải implement `eval()` khi `release_slot` chuyển sang
+   Lua; test assert `eval` được gọi (không chỉ hành vi counter) để tránh regress về GET+DECR.
+3. Bulk đổi mode: chỉ chặn máy **đang đổi** (`exclude(connection_mode=mode)`) còn job active —
+   máy đã đúng mode vẫn no-op update được, tránh fail cả batch OU vì 1 máy đang deploy.
+**Áp dụng:** Mọi gate “transport/mode” (poll, report, đổi mode) phải đối xứng. Semaphore
+guarded counter trên Redis → luôn atomic script, không GET rồi DECR tách rời.
+
+---
+
+## 2026-07-09 — Collect timeout / stale RUNNING phải cleanup residue SMB (không chỉ cancel)
+**Bối cảnh:** Review P0: `cleanup_now` chỉ gọi khi cancel giữa collect hoặc khi `poll_once`
+đọc được `exit.code`. Nhánh timeout và watchdog `reconcile_stuck_deployments` đánh FAILED
+mà không dọn → service `RyanDeployRunner_job{N}` + file dưới `ADMIN$\RyanDeploy\Runner\`
+sót trên máy đích (LocalSystem).
+**Bài học:** Mọi đường kết thúc job SMB mà **không** đi qua `poll_once` (đã đọc exit.code →
+tự `_best_effort_cleanup`) đều phải gọi cùng helper cleanup. Đổi tên `_cleanup_cancelled_target`
+→ `_cleanup_target_residue` vì dùng chung cancel/timeout/reconcile. Reconcile chỉ cleanup khi
+`connection_mode=smb` (agent không dùng PushExecutor). Test reconcile phải stub
+`_cleanup_target_residue` (không SMB thật); test timeout assert `cleanup_now_calls`.
+**Áp dụng:** Khi thêm nhánh terminal mới cho job SMB (FAILED/CANCELLED mà chưa collect xong),
+hỏi ngay: "ai dọn service/file trên máy đích?" — nếu không phải `poll_once` thì gọi
+`_cleanup_target_residue`.
+
+---
+
 ## 2026-07-06 — Tách blocking collect-loop khỏi PushExecutor: chuỗi start()/poll_once() qua 2 Celery task, 2 gotcha ordering dưới eager mode
 **Bối cảnh:** `PushExecutor.run()` (executor.py) chiếm 1 Celery worker process suốt toàn bộ
 thời gian cài đặt (tới 30 phút, `_collect_result` sleep-poll SMB mỗi 3s trong 1 task duy

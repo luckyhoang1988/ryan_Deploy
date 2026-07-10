@@ -32,6 +32,26 @@ secret nằm **plaintext** trong file `.msi`, nên chỉ phân phối qua kênh 
    (`-EnrollSecret` mới), phân phối lại — MSI cũ (chứa secret đã revoke) không còn enroll được
    máy mới, nhưng không ảnh hưởng các máy đã enroll xong (đã đổi sang token riêng).
 
+### Remediation: build lại MSI để sửa `agent.ini` đã ghi sai (vd secret build nhầm)
+
+Nếu một đợt build trước đó lỡ đóng cứng `-EnrollSecret` sai (vd gõ nhầm placeholder thay vì
+secret thật copy từ UI) khiến cả loạt máy không enroll được (kẹt ở retry vô hạn, `agent.ini` có
+`enrollment_secret` sai nhưng **không có** `token` thật), dùng cờ `-ForceOverwrite`:
+
+```powershell
+.\build.ps1 -EnrollSecret "<secret-DUNG-vua-tao>" -ForceOverwrite -Version 1.0.1.0
+```
+
+MSI build ra sẽ luôn ghi đè `agent.ini` bằng `ServerUrl`/`EnrollSecret` mới khi cài lại, **bỏ
+qua** cả hai guard mặc định (nội dung đã khớp / đã có token thật). Cài lại (hoặc để GPO tự nâng
+cấp) lên các máy đang kẹt là đủ để chúng tự enroll lại đúng.
+
+⚠️ Chỉ dùng `-ForceOverwrite` khi chắc chắn các máy đích **chưa** enroll thành công (chưa có
+token thật) — nếu một máy trong đợt đã có token thật đang hoạt động, ghi đè cục bộ không giúp
+ích gì vì server vẫn giữ token cũ và sẽ từ chối enroll lại ("máy đã có token agent đang hoạt
+động") cho tới khi admin revoke token đó thủ công. Không dùng `-ForceOverwrite` cho build thường
+dùng để rollout máy mới.
+
 Nếu build **không truyền** `-EnrollSecret` (mặc định), MSI giữ nguyên hành vi cũ — không tự
 ghi `agent.ini`, phải rải bằng Phương án B hoặc C bên dưới. Tương thích ngược 100% với các rollout
 đang dùng GPO Startup Script.
@@ -156,24 +176,26 @@ log vào `C:\ProgramData\RyanDeployAgent\logs\provision.log`, và tự (re)start
 `RyanDeployAgent` sau khi ghi token — xử lý đúng thứ tự GPO thật (Software Installation chạy
 trước Startup Scripts, nên lần cài đầu service có thể khởi động trước khi có `agent.ini`).
 
-## 4. Xác nhận rollout, rồi mới chuyển máy sang nhận job qua agent
+## 4. Theo dõi rollout — máy tự chuyển sang connection_mode=agent khi enroll thành công
 
 - `Machine.agent_version` / `is_online` / `last_seen` cập nhật qua heartbeat — theo dõi trên
   trang Machines.
-- `AgentToken.last_used_at` tăng khi agent poll thành công lần đầu. **Lưu ý:** có token hợp lệ
-  và poll được KHÔNG có nghĩa máy đã nhận job — `AgentJobPollView` chỉ trả job cho máy đang ở
-  `connection_mode=agent` (mặc định mọi máy là `smb`). Đây là chốt an toàn cố ý để tách "agent
-  đã cài và liên lạc được" khỏi "máy này đã sẵn sàng nhận job qua agent".
-- Sau khi xác nhận các máy trong OU đã poll thành công (`last_used_at` khác null), chuyển hàng
-  loạt sang `connection_mode=agent`:
+- `enroll_machine()` (`apps/agents/services.py`) tự đổi `connection_mode` của máy sang `agent`
+  NGAY khi enroll thành công (đổi enrollment_secret lấy token thật lần đầu) — không cần gọi tay
+  `bulk-set-connection-mode` nữa. Chốt an toàn duy nhất còn giữ: nếu máy đang có job SMB
+  QUEUED/RUNNING đúng lúc enroll, giữ nguyên `connection_mode=smb` (tránh đổi mode giữa chừng
+  job) và ghi warning log — cần tự gọi API bên dưới sau khi job đó xong.
+- Chuyển tay / hàng loạt (dùng cho case bị chặn ở trên, hoặc chủ động ép OU nào đó dùng agent
+  trước khi máy tự enroll):
   ```
   POST /api/machines/bulk-set-connection-mode/
   Body: {"ad_ou": "OU=ZP,DC=corp,DC=local", "connection_mode": "agent"}
   ```
-  (hoặc `{"machine_ids": [1,2,3], "connection_mode": "agent"}` cho danh sách cụ thể — dùng cho
-  pilot trước khi mở rộng cả OU). Chỉ từ lúc này máy mới thực sự nhận job qua agent thay vì SMB.
+  (hoặc `{"machine_ids": [1,2,3], "connection_mode": "agent"}` cho danh sách cụ thể).
 - Rollback: gọi lại API trên với `connection_mode: "smb"` cho máy/OU cần rollback — không cần
-  gỡ agent ngay (agent không tự nhận job nếu đang ở connection_mode=smb).
+  gỡ agent ngay (agent không tự nhận job nếu đang ở connection_mode=smb). Lưu ý: máy đã enroll
+  (còn token thật, còn hiệu lực) sẽ KHÔNG tự chuyển lại `agent` sau rollback thủ công — enroll chỉ
+  chạy 1 lần lúc có token mới; muốn máy đó dùng agent lại thì gọi `bulk-set-connection-mode` tay.
 
 ## Giới hạn đã biết
 
