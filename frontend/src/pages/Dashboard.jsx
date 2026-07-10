@@ -1,35 +1,146 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import Icon from "../components/Icon";
+import { Donut, TimelineBars, usageColor } from "../components/Charts";
+
+const SERVER_STATS_INTERVAL_MS = 3000;
 
 const CARDS = [
-  { key: "packages", label: "Packages" },
-  { key: "machines", label: "Máy trạm" },
-  { key: "machines_online", label: "Đang online" },
-  { key: "deployments", label: "Deployments" },
-  { key: "deployments_running", label: "Đang chạy" },
-  { key: "jobs_success", label: "Job thành công" },
-  { key: "jobs_failed", label: "Job thất bại" },
+  { key: "packages", label: "Packages", icon: "package", tone: "cyan" },
+  { key: "machines", label: "Máy trạm", icon: "monitor", tone: "blue" },
+  { key: "machines_online", label: "Đang online", icon: "wifi", tone: "green" },
+  { key: "deployments", label: "Deployments", icon: "send", tone: "cyan" },
+  { key: "deployments_running", label: "Đang chạy", icon: "activity", tone: "amber" },
+  { key: "jobs_success", label: "Job thành công", icon: "checkCircle", tone: "green" },
+  { key: "jobs_failed", label: "Job thất bại", icon: "xCircle", tone: "red" },
 ];
+
+// Nhãn + màu (theo trạng thái, dùng biến CSS của theme) cho từng slice donut.
+const JOB_SLICES = [
+  { key: "success", label: "Thành công", color: "var(--green)" },
+  { key: "failed", label: "Thất bại", color: "var(--red)" },
+  { key: "running", label: "Đang chạy / chờ", color: "var(--amber)" },
+  { key: "skipped", label: "Bỏ qua", color: "#94a3b8" },
+  { key: "cancelled", label: "Đã hủy", color: "#64748b" },
+];
+
+const DEP_SLICES = [
+  { key: "completed", label: "Hoàn thành", color: "var(--green)" },
+  { key: "completed_errors", label: "Hoàn thành (có lỗi)", color: "var(--amber)" },
+  { key: "running", label: "Đang chạy", color: "var(--blue)" },
+  { key: "scheduled", label: "Đã lên lịch", color: "var(--accent)" },
+  { key: "failed", label: "Thất bại", color: "var(--red)" },
+  { key: "cancelled", label: "Đã hủy", color: "#64748b" },
+  { key: "draft", label: "Nháp", color: "#475569" },
+];
+
+const MACHINE_SLICES = [
+  { key: "online", label: "Online", color: "var(--green)" },
+  { key: "offline", label: "Offline", color: "#64748b" },
+];
+
+function toDonutData(slices, counts) {
+  return slices.map((s) => ({ ...s, value: counts?.[s.key] ?? 0 }));
+}
+
+const SERVER_MINI = [
+  { key: "cpu_percent", label: "CPU" },
+  { key: "ram_percent", label: "RAM" },
+  { key: "disk_percent", label: "Disk" },
+];
+
+// Chỉ báo CPU/RAM/Disk gọn (chấm màu theo ngưỡng + %) — đủ để liếc nhanh, không chiếm chỗ.
+function ServerMini({ stats }) {
+  return (
+    <div className="server-mini" title="CPU / RAM / Ổ đĩa máy chủ (real-time)">
+      {SERVER_MINI.map((m) => {
+        const pct = stats?.[m.key];
+        return (
+          <span className="server-mini-item" key={m.key}>
+            <span className="dot" style={{ background: usageColor(pct ?? 0) }} />
+            {m.label} <strong>{pct != null ? `${Math.round(pct)}%` : "—"}</strong>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
+  const [report, setReport] = useState(null);
+  const [serverStats, setServerStats] = useState(null);
   const [err, setErr] = useState("");
 
   useEffect(() => {
     api.stats().then(setStats).catch((e) => setErr(e.message));
+    api.report().then(setReport).catch((e) => setErr(e.message));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = () =>
+      api
+        .serverStats()
+        .then((d) => !cancelled && setServerStats(d))
+        .catch(() => {});
+    tick();
+    const id = setInterval(tick, SERVER_STATS_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, []);
 
   return (
     <div>
-      <h2>Dashboard</h2>
+      <div className="page-head page-head-row">
+        <div>
+          <h2>Dashboard</h2>
+          <p className="muted">Tổng quan hệ thống triển khai</p>
+        </div>
+        <ServerMini stats={serverStats} />
+      </div>
       {err && <p className="error">{err}</p>}
       <div className="cards">
         {CARDS.map((c) => (
-          <div className="card" key={c.key}>
-            <div className="value">{stats ? stats[c.key] : "—"}</div>
-            <div className="label">{c.label}</div>
+          <div className="card stat" key={c.key}>
+            <div className={`card-icon ${c.tone}`}>
+              <Icon name={c.icon} size={20} />
+            </div>
+            <div className="stat-body">
+              <div className="value">{stats ? stats[c.key] : "—"}</div>
+              <div className="label">{c.label}</div>
+            </div>
           </div>
         ))}
+      </div>
+
+      <div className="page-head mt-lg">
+        <h3>Báo cáo</h3>
+        <p className="muted">Phân bố trạng thái và hoạt động 14 ngày gần nhất</p>
+      </div>
+      <div className="report-row">
+        <div className="card">
+          <div className="chart-title">Trạng thái Job</div>
+          <Donut data={toDonutData(JOB_SLICES, report?.jobs_by_status)} />
+        </div>
+        <div className="card">
+          <div className="chart-title">Trạng thái Deployment</div>
+          <Donut data={toDonutData(DEP_SLICES, report?.deployments_by_status)} />
+        </div>
+        <div className="card">
+          <div className="chart-title">Máy trạm</div>
+          <Donut data={toDonutData(MACHINE_SLICES, report?.machines)} />
+        </div>
+        <div className="card report-wide">
+          <div className="chart-title">Job hoàn tất theo ngày (14 ngày)</div>
+          {report ? (
+            <TimelineBars data={report.timeline} />
+          ) : (
+            <p className="muted">Đang tải…</p>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -20,6 +20,7 @@ class JobStep(models.TextChoices):
     COPY = "copy", "Copy file"
     EXECUTE = "execute", "Thực thi cài đặt"
     COLLECT = "collect", "Thu kết quả"
+    VERIFY = "verify", "Hậu kiểm"
     CLEANUP = "cleanup", "Dọn dẹp"
     DONE = "done", "Xong"
 

@@ -72,6 +72,56 @@ def test_admin_creates_credential_password_hidden(admin_client):
     assert cred.get_password() == "secret"
 
 
+def test_admin_update_credential_audited(admin_client):
+    from apps.audit.models import AuditLog
+
+    r = admin_client.post(
+        "/api/credentials/",
+        {"name": "svc", "username": "u", "password": "p"},
+        content_type="application/json",
+    )
+    cid = r.json()["id"]
+    r2 = admin_client.patch(
+        f"/api/credentials/{cid}/", {"name": "svc-renamed"}, content_type="application/json"
+    )
+    assert r2.status_code == 200
+    assert AuditLog.objects.filter(
+        action=AuditLog.Action.CREDENTIAL_UPDATE, target_id=str(cid)
+    ).exists()
+
+
+def test_admin_delete_credential_audited(admin_client):
+    from apps.audit.models import AuditLog
+
+    r = admin_client.post(
+        "/api/credentials/",
+        {"name": "throwaway", "username": "u", "password": "p"},
+        content_type="application/json",
+    )
+    cid = r.json()["id"]
+    r2 = admin_client.delete(f"/api/credentials/{cid}/")
+    assert r2.status_code == 204
+    # Log ghi TRƯỚC khi xóa nên vẫn giữ được target_id/tên.
+    assert AuditLog.objects.filter(
+        action=AuditLog.Action.CREDENTIAL_DELETE, target_id=str(cid)
+    ).exists()
+
+
+def test_viewer_cannot_read_audit_logs(viewer_client):
+    # Audit finding "Viewer đọc audit log": AuditLogViewSet giờ Tier-0 (IsAdminStrict) —
+    # viewer/operator không còn đọc được (log chứa chi tiết nhạy cảm: tên credential,
+    # lỗi job, kết quả sync AD).
+    assert viewer_client.get("/api/audit-logs/").status_code == 403
+
+
+def test_operator_cannot_read_audit_logs(operator_client):
+    assert operator_client.get("/api/audit-logs/").status_code == 403
+
+
+def test_admin_can_read_audit_logs(admin_client):
+    assert admin_client.get("/api/audit-logs/").status_code == 200
+
+
 def test_viewer_cannot_create_credential(viewer_client):
     r = viewer_client.post(
         "/api/credentials/",
@@ -124,3 +174,349 @@ def test_operator_cannot_create_machine(operator_client):
         content_type="application/json",
     )
     assert r.status_code == 403
+
+
+def test_operator_cannot_create_machine_group(operator_client):
+    # Nhóm máy là Tier-0 (quyết định target deploy) → chỉ admin được tạo/sửa.
+    r = operator_client.post(
+        "/api/machine-groups/",
+        {"name": "Nhóm lạ"},
+        content_type="application/json",
+    )
+    assert r.status_code == 403
+
+
+def test_viewer_can_read_machine_groups(viewer_client):
+    r = viewer_client.get("/api/machine-groups/")
+    assert r.status_code == 200
+
+
+def test_admin_can_create_machine_group(admin_client):
+    r = admin_client.post(
+        "/api/machine-groups/",
+        {"name": "Kế toán"},
+        content_type="application/json",
+    )
+    assert r.status_code == 201
+
+
+# --- Sửa/Xóa package + version (CRUD admin) ---
+
+
+def _create_version(admin_client, pkg_name="7-Zip", version="1.0"):
+    """Tạo package + upload 1 version qua API, trả (package_id, version_id)."""
+    from django.core.files.uploadedfile import SimpleUploadedFile
+
+    pr = admin_client.post("/api/packages/", {"name": pkg_name}, content_type="application/json")
+    pid = pr.json()["id"]
+    installer = SimpleUploadedFile("setup.msi", b"MZ fake installer bytes", content_type="application/octet-stream")
+    vr = admin_client.post(
+        "/api/package-versions/",
+        {"package": pid, "version": version, "installer_file": installer},
+    )
+    assert vr.status_code == 201, vr.content
+    return pid, vr.json()["id"]
+
+
+def test_admin_update_package_audited(admin_client):
+    from apps.audit.models import AuditLog
+
+    pr = admin_client.post("/api/packages/", {"name": "Firefox"}, content_type="application/json")
+    pid = pr.json()["id"]
+    r = admin_client.patch(
+        f"/api/packages/{pid}/", {"vendor": "Mozilla", "total_licenses": 50}, content_type="application/json"
+    )
+    assert r.status_code == 200
+    assert r.json()["vendor"] == "Mozilla"
+    assert AuditLog.objects.filter(action=AuditLog.Action.PACKAGE_UPDATE, target_id=str(pid)).exists()
+
+
+def test_admin_delete_version_removes_file_and_audits(admin_client):
+    import os
+
+    from apps.audit.models import AuditLog
+    from apps.packages.models import PackageVersion
+
+    _pid, vid = _create_version(admin_client)
+    path = PackageVersion.objects.get(id=vid).installer_file.path
+    assert os.path.exists(path)
+
+    r = admin_client.delete(f"/api/package-versions/{vid}/")
+    assert r.status_code == 204
+    assert not PackageVersion.objects.filter(id=vid).exists()
+    assert not os.path.exists(path)  # file installer đã bị dọn khỏi repository
+    assert AuditLog.objects.filter(action=AuditLog.Action.PACKAGE_VERSION_DELETE, target_id=str(vid)).exists()
+
+
+def test_admin_delete_package_cascades_and_audits(admin_client):
+    import os
+
+    from apps.audit.models import AuditLog
+    from apps.packages.models import Package, PackageVersion
+
+    pid, vid = _create_version(admin_client, pkg_name="Chrome")
+    path = PackageVersion.objects.get(id=vid).installer_file.path
+
+    r = admin_client.delete(f"/api/packages/{pid}/")
+    assert r.status_code == 204
+    assert not Package.objects.filter(id=pid).exists()
+    assert not PackageVersion.objects.filter(id=vid).exists()
+    assert not os.path.exists(path)
+    assert AuditLog.objects.filter(action=AuditLog.Action.PACKAGE_DELETE, target_id=str(pid)).exists()
+
+
+def test_delete_version_referenced_by_deployment_blocked(admin_client):
+    from apps.credentials.models import DeployCredential
+    from apps.deployments.models import Deployment
+    from apps.packages.models import PackageVersion
+
+    _pid, vid = _create_version(admin_client, pkg_name="Notepad++")
+    version = PackageVersion.objects.get(id=vid)
+    cred = DeployCredential.objects.create(name="c", username="u")
+    Deployment.objects.create(name="dep", package_version=version, credential=cred)
+
+    # FK PROTECT → phải bị chặn với lỗi thân thiện (400), không phải 500.
+    r = admin_client.delete(f"/api/package-versions/{vid}/")
+    assert r.status_code == 400
+    assert PackageVersion.objects.filter(id=vid).exists()
+
+
+# --- Sửa/Xóa deployment ---
+
+
+def _make_deployment(status="draft"):
+    """Tạo trực tiếp một deployment (bỏ qua wizard) để test sửa/xóa."""
+    from apps.credentials.models import DeployCredential
+    from apps.deployments.models import Deployment
+
+    cred = DeployCredential.objects.create(name=f"c-{status}", username="u")
+    return Deployment.objects.create(name="dep", credential=cred, action="inventory", status=status)
+
+
+def test_operator_update_deployment_audited(operator_client):
+    from apps.audit.models import AuditLog
+
+    dep = _make_deployment()
+    r = operator_client.patch(
+        f"/api/deployments/{dep.id}/", {"name": "dep-renamed"}, content_type="application/json"
+    )
+    assert r.status_code == 200, r.content
+    assert r.json()["name"] == "dep-renamed"
+    assert AuditLog.objects.filter(action=AuditLog.Action.DEPLOYMENT_UPDATE, target_id=str(dep.id)).exists()
+
+
+def test_operator_delete_deployment_cascades_jobs_and_audits(operator_client):
+    from apps.audit.models import AuditLog
+    from apps.deployments.models import Deployment
+    from apps.jobs.models import Job
+    from apps.machines.models import Machine
+
+    dep = _make_deployment()
+    machine = Machine.objects.create(hostname="PC-DEL")
+    Job.objects.create(deployment=dep, machine=machine)
+
+    r = operator_client.delete(f"/api/deployments/{dep.id}/")
+    assert r.status_code == 204
+    assert not Deployment.objects.filter(id=dep.id).exists()
+    assert not Job.objects.filter(deployment_id=dep.id).exists()  # CASCADE
+    assert AuditLog.objects.filter(action=AuditLog.Action.DEPLOYMENT_DELETE, target_id=str(dep.id)).exists()
+
+
+def test_cannot_delete_running_deployment(operator_client):
+    from apps.deployments.models import Deployment
+
+    dep = _make_deployment(status="running")
+    r = operator_client.delete(f"/api/deployments/{dep.id}/")
+    assert r.status_code == 400
+    assert Deployment.objects.filter(id=dep.id).exists()
+
+
+def test_cannot_update_running_deployment(operator_client):
+    dep = _make_deployment(status="running")
+    r = operator_client.patch(
+        f"/api/deployments/{dep.id}/", {"name": "nope"}, content_type="application/json"
+    )
+    assert r.status_code == 400
+
+
+def test_viewer_cannot_delete_deployment(viewer_client):
+    dep = _make_deployment()
+    r = viewer_client.delete(f"/api/deployments/{dep.id}/")
+    assert r.status_code == 403
+
+
+# --- Credential: chỉ admin đọc được (kể cả GET) ---
+
+
+def test_viewer_cannot_read_credentials(viewer_client, admin_client):
+    admin_client.post(
+        "/api/credentials/",
+        {"name": "svc", "username": "u", "password": "p"},
+        content_type="application/json",
+    )
+    r = viewer_client.get("/api/credentials/")
+    assert r.status_code == 403
+
+
+def test_operator_cannot_read_credentials(operator_client, admin_client):
+    admin_client.post(
+        "/api/credentials/",
+        {"name": "svc2", "username": "u", "password": "p"},
+        content_type="application/json",
+    )
+    r = operator_client.get("/api/credentials/")
+    assert r.status_code == 403
+
+
+def test_admin_can_read_credentials(admin_client):
+    admin_client.post(
+        "/api/credentials/",
+        {"name": "svc3", "username": "u", "password": "p"},
+        content_type="application/json",
+    )
+    r = admin_client.get("/api/credentials/")
+    assert r.status_code == 200
+
+
+# --- Job log: viewer thấy status nhưng KHÔNG thấy output/error_output ---
+
+
+def test_viewer_sees_job_status_but_not_output(viewer_client, operator_client):
+    from apps.jobs.models import Job, JobStatus
+    from apps.machines.models import Machine
+
+    dep = _make_deployment()
+    machine = Machine.objects.create(hostname="PC-LOG")
+    job = Job.objects.create(
+        deployment=dep, machine=machine, status=JobStatus.FAILED,
+        output="stdout nhạy cảm", error_output="lỗi chi tiết máy đích",
+    )
+
+    r_viewer = viewer_client.get(f"/api/jobs/?deployment={dep.id}")
+    assert r_viewer.status_code == 200
+    body = r_viewer.json()["results"] if isinstance(r_viewer.json(), dict) else r_viewer.json()
+    viewer_job = next(j for j in body if j["id"] == job.id)
+    assert viewer_job["status"] == JobStatus.FAILED
+    assert viewer_job["output"] is None
+    assert viewer_job["error_output"] is None
+
+    r_op = operator_client.get(f"/api/jobs/?deployment={dep.id}")
+    op_body = r_op.json()["results"] if isinstance(r_op.json(), dict) else r_op.json()
+    op_job = next(j for j in op_body if j["id"] == job.id)
+    assert op_job["output"] == "stdout nhạy cảm"
+    assert op_job["error_output"] == "lỗi chi tiết máy đích"
+
+
+# --- Deployment cancel: chỉ cho hủy khi SCHEDULED/RUNNING ---
+
+
+def test_cancel_completed_deployment_rejected(operator_client):
+    dep = _make_deployment(status="completed")
+    r = operator_client.post(f"/api/deployments/{dep.id}/cancel/", {}, content_type="application/json")
+    assert r.status_code == 409
+    dep.refresh_from_db()
+    assert dep.status == "completed"
+
+
+def test_cancel_draft_deployment_rejected(operator_client):
+    dep = _make_deployment(status="draft")
+    r = operator_client.post(f"/api/deployments/{dep.id}/cancel/", {}, content_type="application/json")
+    assert r.status_code == 409
+
+
+def test_cancel_running_deployment_allowed(operator_client):
+    dep = _make_deployment(status="running")
+    r = operator_client.post(f"/api/deployments/{dep.id}/cancel/", {}, content_type="application/json")
+    assert r.status_code == 200
+    dep.refresh_from_db()
+    assert dep.status == "cancelled"
+
+
+# --- purge_all: không vỡ 500 khi máy còn job liên kết (FK PROTECT) ---
+
+
+def test_purge_all_blocked_when_machine_has_job(admin_client):
+    from apps.machines.models import Machine
+
+    dep = _make_deployment()
+    machine = Machine.objects.create(hostname="PC-PROTECTED")
+    from apps.jobs.models import Job
+
+    Job.objects.create(deployment=dep, machine=machine)
+
+    r = admin_client.post("/api/machines/purge_all/", {}, content_type="application/json")
+    assert r.status_code == 409
+    assert Machine.objects.filter(id=machine.id).exists()
+
+
+# --- purge_all: chặn khi còn token agent active (CASCADE sẽ giết agent) ---
+
+
+def test_purge_all_blocked_when_active_agent_token_without_force(admin_client):
+    from apps.agents.services import issue_token
+    from apps.machines.models import Machine
+
+    machine = Machine.objects.create(hostname="PC-AGENT")
+    issue_token(machine)
+
+    r = admin_client.post("/api/machines/purge_all/", {}, content_type="application/json")
+    assert r.status_code == 409
+    body = r.json()
+    assert body["requires_force"] is True
+    assert body["agent_tokens_affected"] == 1
+    # Không có gì bị xóa khi bị chặn.
+    assert Machine.objects.filter(id=machine.id).exists()
+
+
+def test_purge_all_with_force_deletes_despite_active_agent_token(admin_client):
+    from apps.agents.services import issue_token
+    from apps.machines.models import Machine
+
+    machine = Machine.objects.create(hostname="PC-AGENT2")
+    issue_token(machine)
+
+    r = admin_client.post(
+        "/api/machines/purge_all/", {"force": True}, content_type="application/json"
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted"] >= 1
+    assert body["agent_tokens_destroyed"] == 1
+    assert not Machine.objects.filter(id=machine.id).exists()
+
+
+# --- purge_all: ghi audit log cho hành động Tier-0 phá hủy ---
+
+
+def test_purge_all_records_audit_log_with_force(admin_client):
+    from apps.agents.services import issue_token
+    from apps.audit.models import AuditLog
+    from apps.machines.models import Machine
+
+    machine = Machine.objects.create(hostname="PC-AGENT3")
+    issue_token(machine)
+
+    r = admin_client.post(
+        "/api/machines/purge_all/", {"force": True}, content_type="application/json"
+    )
+    assert r.status_code == 200
+
+    log = AuditLog.objects.filter(action=AuditLog.Action.MACHINE_PURGE_ALL).latest("created_at")
+    assert log.user is not None  # phải biết ai đã ép xóa
+    assert log.detail["forced"] is True
+    assert log.detail["agent_tokens_destroyed"] == 1
+    assert log.detail["objects_deleted"] >= 1
+
+
+def test_purge_all_no_audit_log_when_blocked(admin_client):
+    """Bị chặn (409, chưa force) thì KHÔNG có gì bị xóa → không ghi log 'đã xóa'."""
+    from apps.agents.services import issue_token
+    from apps.audit.models import AuditLog
+    from apps.machines.models import Machine
+
+    machine = Machine.objects.create(hostname="PC-AGENT4")
+    issue_token(machine)
+
+    r = admin_client.post("/api/machines/purge_all/", {}, content_type="application/json")
+    assert r.status_code == 409
+    assert not AuditLog.objects.filter(action=AuditLog.Action.MACHINE_PURGE_ALL).exists()

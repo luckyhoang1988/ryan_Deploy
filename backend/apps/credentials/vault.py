@@ -1,7 +1,7 @@
 """
 Credential Vault — mã hóa/giải mã secret at-rest bằng Fernet (AES-128-CBC + HMAC).
 
-Khóa lấy từ settings.PYDEPLOY['VAULT_KEY']. Ở production BẮT BUỘC đặt key thật
+Khóa lấy từ settings.RYANDEPLOY['VAULT_KEY']. Ở production BẮT BUỘC đặt key thật
 (prod.py sẽ raise nếu thiếu). Ở dev, nếu thiếu key sẽ derive tạm từ SECRET_KEY
 để chạy được — KHÔNG dùng cách này ở production.
 """
@@ -28,14 +28,25 @@ def _get_fernet() -> Fernet:
     if _fernet is not None:
         return _fernet
 
-    key = settings.PYDEPLOY.get("VAULT_KEY")
+    key = settings.RYANDEPLOY.get("VAULT_KEY")
     if key:
         key_bytes = key.encode() if isinstance(key, str) else key
-    else:
+    elif settings.RYANDEPLOY.get("VAULT_DEV_FALLBACK"):
+        # Cờ riêng (dev.py/test.py) — KHÔNG dùng settings.DEBUG: pytest-django tự ép
+        # DEBUG=False cho mọi test bất kể settings module thật, nên DEBUG không đáng tin
+        # ở đây làm tín hiệu môi trường.
         logger.warning(
-            "PYDEPLOY_VAULT_KEY chưa đặt — dùng key derive tạm từ SECRET_KEY (chỉ hợp lệ cho dev)."
+            "RYANDEPLOY_VAULT_KEY chưa đặt — dùng key derive tạm từ SECRET_KEY (chỉ hợp lệ cho dev)."
         )
         key_bytes = _derive_dev_key()
+    else:
+        # prod.py đã raise ở settings-load-time nếu thiếu VAULT_KEY, nhưng đó là lớp bảo vệ
+        # độc lập — guard ở đây phòng trường hợp 1 settings module khác (không kế thừa
+        # guard của prod.py, không bật VAULT_DEV_FALLBACK) mà quên đặt VAULT_KEY.
+        raise RuntimeError(
+            "RYANDEPLOY_VAULT_KEY chưa đặt và VAULT_DEV_FALLBACK không bật — từ chối dùng key "
+            "derive tạm (chỉ an toàn cho dev). Đặt RYANDEPLOY_VAULT_KEY trước khi mã hóa/giải mã credential."
+        )
 
     _fernet = Fernet(key_bytes)
     return _fernet

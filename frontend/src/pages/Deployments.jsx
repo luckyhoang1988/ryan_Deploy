@@ -1,27 +1,119 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { api, listOf } from "../api";
+import { api } from "../api";
 import { StatusBadge } from "../components/Layout";
+import DeploymentWizard from "../components/DeploymentWizard";
+import Pagination from "../components/Pagination";
+import { useAuth } from "../auth";
+import { subscribe } from "../ws";
+
+const PAGE_SIZE = 30;
+
+// Nhãn tiếng Việt cho DeploymentStatus, khớp STATUS_META trong components/Layout.jsx.
+const DEPLOYMENT_STATUS_OPTIONS = [
+  ["draft", "Nháp"],
+  ["scheduled", "Đã lên lịch"],
+  ["running", "Đang chạy"],
+  ["completed", "Hoàn thành"],
+  ["completed_errors", "Hoàn thành (có lỗi)"],
+  ["failed", "Thất bại"],
+  ["cancelled", "Đã hủy"],
+];
 
 export default function Deployments() {
+  const { hasRole } = useAuth();
+  const canWrite = hasRole("operator", "admin");
+  const isAdmin = hasRole("admin");
   const [deployments, setDeployments] = useState([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [page, setPage] = useState(1);
+  const [filterStatus, setFilterStatus] = useState("");
   const [showWizard, setShowWizard] = useState(false);
+  const [editDep, setEditDep] = useState(null);
   const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
 
-  const load = () =>
-    api.get("/deployments/").then((d) => setDeployments(listOf(d))).catch((e) => setErr(e.message));
+  const buildQuery = useCallback((p) => {
+    const params = new URLSearchParams();
+    params.set("page", p);
+    if (filterStatus) params.set("status", filterStatus);
+    return params.toString();
+  }, [filterStatus]);
+
+  const load = useCallback((p = page) => {
+    api.get(`/deployments/?${buildQuery(p)}`)
+      .then((d) => {
+        setDeployments(d.results ?? []);
+        setTotalCount(d.count ?? 0);
+      })
+      .catch((e) => setErr(e.message));
+  }, [buildQuery, page]);
 
   useEffect(() => {
-    load();
+    load(page);
+  }, [page, buildQuery]);
+
+  // Khi đổi filter trạng thái → reset về trang 1.
+  useEffect(() => {
+    setPage(1);
+  }, [filterStatus]);
+
+  const exportCSV = () => {
+    const params = new URLSearchParams();
+    if (filterStatus) params.set("status", filterStatus);
+    const q = params.toString();
+    window.open(`/api/deployments/export/${q ? "?" + q : ""}`, "_blank");
+  };
+
+  // WebSocket real-time: patch đúng dòng theo id thay vì phải load lại cả trang.
+  useEffect(() => {
+    return subscribe("deployment.update", (data) => {
+      setDeployments((prev) => {
+        // Deployment mới tạo lúc trang đang mở (vd lịch lặp tự kích hoạt) → không có
+        // trong state hiện tại, bỏ qua thay vì chèn bản ghi thiếu field name/package_name.
+        if (!prev.some((d) => d.id === data.id)) return prev;
+        return prev.map((d) => (d.id === data.id ? { ...d, ...data } : d));
+      });
+    });
   }, []);
+
+  const remove = async (d) => {
+    if (!confirm(`Xóa deployment "${d.name}"? Toàn bộ lịch sử job của nó cũng bị xóa.`)) return;
+    setErr(""); setMsg("");
+    try {
+      await api.del(`/deployments/${d.id}/`);
+      setMsg(`Đã xóa "${d.name}".`);
+      load();
+    } catch (e) { setErr(e.message); }
+  };
 
   return (
     <div>
       <div className="topbar">
         <h2>Deployments</h2>
-        <button className="btn" onClick={() => setShowWizard(true)}>+ Tạo deployment</button>
+        {canWrite && <button className="btn" onClick={() => setShowWizard(true)}>+ Tạo deployment</button>}
       </div>
+      {msg && <p className="muted">{msg}</p>}
       {err && <p className="error">{err}</p>}
+
+      <div className="filter-bar">
+        <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} style={{ maxWidth: 200 }}>
+          <option value="">Tất cả trạng thái</option>
+          {DEPLOYMENT_STATUS_OPTIONS.map(([value, label]) => (
+            <option key={value} value={value}>{label}</option>
+          ))}
+        </select>
+        {filterStatus && (
+          <button className="btn ghost" style={{ padding: "6px 12px" }} onClick={() => setFilterStatus("")}>
+            ✕ Xóa lọc
+          </button>
+        )}
+        <div style={{ flex: 1 }} />
+        <button className="btn ghost" onClick={exportCSV} title="Xuất danh sách deployment ra Excel (CSV)">
+          📥 Xuất Excel
+        </button>
+      </div>
+
       <table>
         <thead>
           <tr><th>Tên</th><th>Package</th><th>Trạng thái</th><th>Tiến độ</th><th></th></tr>
@@ -32,52 +124,75 @@ export default function Deployments() {
               <td>{d.name}</td>
               <td>{d.package_name} {d.version}</td>
               <td><StatusBadge status={d.status} /></td>
-              <td className="muted">{d.success_count}✓ / {d.failed_count}✗ / {d.total_count} máy</td>
-              <td><Link to={`/deployments/${d.id}`}>Chi tiết →</Link></td>
+              <td className="muted">{d.success_count}✓ / {d.failed_count}✗ / {d.skipped_count}⏭ / {d.total_count} máy</td>
+              <td>
+                <div className="row" style={{ gap: 10, justifyContent: "flex-end" }}>
+                  <Link to={`/deployments/${d.id}`}>Chi tiết →</Link>
+                  {canWrite && (
+                    <>
+                      <button className="btn ghost" style={{ padding: "4px 10px" }} onClick={() => setEditDep(d)}>Sửa</button>
+                      <button className="btn ghost danger" style={{ padding: "4px 10px" }} onClick={() => remove(d)}>Xóa</button>
+                    </>
+                  )}
+                </div>
+              </td>
             </tr>
           ))}
           {deployments.length === 0 && <tr><td colSpan="5" className="muted">Chưa có deployment.</td></tr>}
         </tbody>
       </table>
+
+      <Pagination page={page} totalCount={totalCount} pageSize={PAGE_SIZE} onPageChange={setPage} itemLabel="deployment" />
+
       {showWizard && (
-        <Wizard onClose={() => setShowWizard(false)} onDone={() => { setShowWizard(false); load(); }} />
+        <DeploymentWizard
+          isAdmin={isAdmin}
+          onClose={() => setShowWizard(false)}
+          onDone={() => { setShowWizard(false); setMsg("Đã tạo deployment."); load(); }}
+        />
+      )}
+      {editDep && (
+        <EditModal
+          dep={editDep}
+          onClose={() => setEditDep(null)}
+          onDone={() => { setEditDep(null); setMsg("Đã lưu deployment."); load(); }}
+        />
       )}
     </div>
   );
 }
 
-function Wizard({ onClose, onDone }) {
-  const [versions, setVersions] = useState([]);
-  const [credentials, setCredentials] = useState([]);
-  const [machines, setMachines] = useState([]);
-  const [form, setForm] = useState({ name: "", package_version: "", credential: "", target_machines: [] });
+// Định dạng datetime cho input datetime-local (yyyy-MM-ddThh:mm, theo giờ địa phương).
+function toLocalInput(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function EditModal({ dep, onClose, onDone }) {
+  const [form, setForm] = useState({
+    name: dep.name || "",
+    scheduled_at: toLocalInput(dep.scheduled_at),
+    max_concurrency: dep.max_concurrency ?? 15,
+    retry_limit: dep.retry_limit ?? 1,
+  });
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => {
-    api.get("/package-versions/").then((d) => setVersions(listOf(d)));
-    api.get("/credentials/").then((d) => setCredentials(listOf(d))).catch(() => {});
-    api.get("/machines/").then((d) => setMachines(listOf(d)));
-  }, []);
-
-  const toggleMachine = (id) => {
-    setForm((f) => {
-      const has = f.target_machines.includes(id);
-      return { ...f, target_machines: has ? f.target_machines.filter((x) => x !== id) : [...f.target_machines, id] };
-    });
-  };
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const submit = async (e) => {
     e.preventDefault();
     setErr(""); setBusy(true);
     try {
-      const dep = await api.post("/deployments/", {
+      await api.patch(`/deployments/${dep.id}/`, {
         name: form.name,
-        package_version: form.package_version,
-        credential: form.credential,
-        target_machines: form.target_machines,
+        // datetime-local không có timezone → new Date() diễn giải theo giờ máy, gửi ISO UTC.
+        scheduled_at: form.scheduled_at ? new Date(form.scheduled_at).toISOString() : null,
+        max_concurrency: Number(form.max_concurrency) || 1,
+        retry_limit: Number(form.retry_limit) || 0,
       });
-      await api.post(`/deployments/${dep.id}/trigger/`, {});
       onDone();
     } catch (e2) {
       setErr(e2.message);
@@ -89,35 +204,28 @@ function Wizard({ onClose, onDone }) {
   return (
     <div className="modal-bg" onClick={onClose}>
       <form className="modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
-        <h3>Tạo & chạy deployment</h3>
+        <h3>Sửa deployment</h3>
         <label>Tên</label>
-        <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
-        <label>Package version</label>
-        <select value={form.package_version} onChange={(e) => setForm({ ...form, package_version: e.target.value })} required>
-          <option value="">— Chọn —</option>
-          {versions.map((v) => <option key={v.id} value={v.id}>{v.package_name} {v.version}</option>)}
-        </select>
-        <label>Credential deploy</label>
-        <select value={form.credential} onChange={(e) => setForm({ ...form, credential: e.target.value })} required>
-          <option value="">— Chọn —</option>
-          {credentials.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
-        <label>Máy đích ({form.target_machines.length} chọn)</label>
-        <div className="log" style={{ maxHeight: 160 }}>
-          {machines.map((m) => (
-            <label key={m.id} className="row" style={{ margin: "2px 0" }}>
-              <input type="checkbox" style={{ width: "auto" }}
-                checked={form.target_machines.includes(m.id)}
-                onChange={() => toggleMachine(m.id)} />
-              <span>{m.hostname} {m.is_online ? "🟢" : "⚪"}</span>
-            </label>
-          ))}
-          {machines.length === 0 && <span className="muted">Chưa có máy.</span>}
+        <input value={form.name} onChange={set("name")} required />
+        <label>Lịch chạy (để trống = chạy ngay khi kích hoạt)</label>
+        <input type="datetime-local" value={form.scheduled_at} onChange={set("scheduled_at")} />
+        <div className="row" style={{ gap: 12 }}>
+          <div style={{ flex: 1 }}>
+            <label>Số máy chạy song song</label>
+            <input type="number" min="1" value={form.max_concurrency} onChange={set("max_concurrency")} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label>Số lần thử lại</label>
+            <input type="number" min="0" value={form.retry_limit} onChange={set("retry_limit")} />
+          </div>
         </div>
+        <p className="muted" style={{ fontSize: 12, marginTop: -4 }}>
+          Không sửa được deployment đang chạy — hãy hủy trước. Đổi máy đích/package thì tạo deployment mới.
+        </p>
         {err && <p className="error mt">{err}</p>}
         <div className="row spread mt">
           <button type="button" className="btn ghost" onClick={onClose}>Hủy</button>
-          <button className="btn" disabled={busy}>{busy ? "Đang chạy…" : "Tạo & Deploy"}</button>
+          <button className="btn" disabled={busy}>{busy ? "Đang lưu…" : "Lưu"}</button>
         </div>
       </form>
     </div>

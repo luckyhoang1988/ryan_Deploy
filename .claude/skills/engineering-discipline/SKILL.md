@@ -24,7 +24,7 @@ description: >-
 - Mọi thay đổi có mặt runtime phải được **chạy thật** để quan sát hành vi — không chỉ dựa vào "trông có vẻ đúng".
 - Ưu tiên: chạy đúng luồng bị ảnh hưởng (end-to-end), rồi mới đến unit test.
 - Không tuyên bố "đã xong/đã fix" nếu chưa thấy nó chạy đúng. Nếu test fail, báo cáo trung thực kèm output.
-- Với dự án này: `manage.py check`, `pytest` (dùng `DJANGO_SETTINGS_MODULE=pydeploy.settings.test` cho sqlite), `npm run build`.
+- Với dự án này: `manage.py check`, `pytest` (dùng `DJANGO_SETTINGS_MODULE=ryandeploy.settings.test` cho sqlite), `npm run build`.
 
 ## 3. Đọc kỹ tài liệu chuyên môn để cập nhật skill
 - Trước khi dùng thư viện/công nghệ mới, đọc tài liệu chính thức — không dựa vào trí nhớ.
@@ -52,6 +52,14 @@ description: >-
 - Nghĩ về ảnh hưởng lan tỏa: migration, API contract, frontend, test, bảo mật, tương thích ngược.
 - Với việc phức tạp: phác thảo kế hoạch (dùng TodoWrite nếu nhiều bước) trước khi thực thi.
 
+## 8. Có nhiều phần/giai đoạn → làm xong 1 phần rồi DỪNG hỏi tiếp
+- Khi thực hiện một kế hoạch có nhiều mục/phần (§1, §2, §3... hoặc nhiều bước rời rạc trong TodoWrite),
+  làm xong **một phần** (kể cả đã test/pass) thì **dừng lại**, báo cáo ngắn gọn đã làm gì, và hỏi
+  user có muốn làm tiếp phần kế tiếp không — **không** tự động chạy liền một mạch qua hết các phần
+  chỉ vì đã có sự đồng ý ban đầu cho toàn bộ kế hoạch.
+- Ngoại lệ: nếu user đã nói rõ ràng "làm hết/làm liền tất cả các phần, không cần hỏi lại" cho lần
+  thực hiện đó thì mới được chạy liên tục.
+
 ---
 
 ## Checklist nhanh cho mỗi thay đổi
@@ -69,6 +77,7 @@ TRONG KHI:
 SAU:
 □ (2) Đã CHẠY THẬT và quan sát kết quả? Test pass?
 □ (6) Có bài học nào mới? → ghi vào LESSONS.md.
+□ (8) Việc có nhiều phần? → dừng, báo cáo, hỏi user có làm tiếp phần sau không.
 □ Báo cáo trung thực: nếu test fail hay bước bị bỏ qua, nói rõ.
 ```
 

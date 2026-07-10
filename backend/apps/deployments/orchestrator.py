@@ -3,7 +3,7 @@ Orchestrator — fan-out một Deployment thành nhiều Job và đẩy song son
 
 Dùng Celery chord: group(deploy_to_machine cho mỗi máy) -> finalize_deployment.
 Mức song song thực tế do worker concurrency quyết định
-(docker-compose: --concurrency=${PYDEPLOY_MAX_CONCURRENCY}).
+(docker-compose: --concurrency=${RYANDEPLOY_MAX_CONCURRENCY}).
 """
 import logging
 
@@ -12,9 +12,11 @@ from django.utils import timezone
 
 from apps.jobs.models import Job, JobStatus
 from apps.jobs.tasks import deploy_to_machine, finalize_deployment
+from apps.machines.models import ConnectionMode
 
 from .models import DeploymentStatus
 from .semaphore import clear_slots
+from .targeting import resolve_targets
 
 logger = logging.getLogger("apps.deployments")
 
@@ -24,7 +26,8 @@ def launch_deployment(deployment) -> int:
     Tạo Job cho mỗi máy đích (idempotent) và enqueue chord.
     Trả về số job được đẩy vào hàng đợi.
     """
-    machines = list(deployment.target_machines.filter(enabled=True))
+    # Áp targeting_rule (nếu có): vd chỉ cài lên máy CHƯA có phần mềm theo inventory.
+    machines = resolve_targets(deployment)
     if not machines:
         return 0
 
@@ -44,6 +47,13 @@ def launch_deployment(deployment) -> int:
                 "error_output": "",
                 "current_step": "",
                 "finished_at": None,
+                # Reset bookkeeping từ lần chạy trước — thiếu bước này thì retrigger sau khi
+                # đã hết retry_limit ở lượt trước sẽ kế thừa attempts cũ và mất hết lượt retry
+                # ngay từ job đầu của lượt mới (job.attempts <= deployment.retry_limit ở
+                # jobs/tasks.py so với giá trị cũ còn sót lại).
+                "attempts": 0,
+                "started_at": None,
+                "celery_task_id": "",
             },
         )
         job_ids.append(job.pk)
@@ -53,35 +63,46 @@ def launch_deployment(deployment) -> int:
     deployment.finished_at = None
     deployment.save(update_fields=["status", "started_at", "finished_at"])
 
-    # Fan-out song song + callback tổng kết
-    header = [deploy_to_machine.s(jid) for jid in job_ids]
-    chord(header)(finalize_deployment.s(deployment.id))
+    # Chỉ máy connection_mode=smb được dispatch NGAY qua Celery chord (server chủ động đẩy).
+    # Job của máy connection_mode=agent giữ nguyên QUEUED — AgentJobPollView sẽ claim khi
+    # agent tự poll tới; reconcile_stuck_deployments đảm nhiệm finalize khi tất cả job (kể
+    # cả agent) đã xong, vì không có chord nào chờ chúng.
+    smb_job_ids = [
+        jid for jid, machine in zip(job_ids, machines) if machine.connection_mode == ConnectionMode.SMB
+    ]
+    if smb_job_ids:
+        header = [deploy_to_machine.s(jid) for jid in smb_job_ids]
+        chord(header)(finalize_deployment.s(deployment.id))
 
-    logger.info("Deployment %s: đẩy %s job", deployment.id, len(job_ids))
+    logger.info(
+        "Deployment %s: đẩy %s job (%s qua SMB, %s chờ agent poll)",
+        deployment.id, len(job_ids), len(smb_job_ids), len(job_ids) - len(smb_job_ids),
+    )
     return len(job_ids)
 
 
 def cancel_deployment(deployment) -> int:
     """Đánh dấu các job chưa kết thúc là CANCELLED và revoke task."""
-    from pydeploy.celery import app
+    from ryandeploy.celery import app
 
-    pending = deployment.jobs.exclude(
-        status__in=[
-            JobStatus.SUCCESS,
-            JobStatus.SUCCESS_REBOOT,
-            JobStatus.FAILED,
-            JobStatus.CANCELLED,
-        ]
-    )
+    terminal = [
+        JobStatus.SUCCESS,
+        JobStatus.SUCCESS_REBOOT,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+    ]
+    pending = list(deployment.jobs.exclude(status__in=terminal))
+    now = timezone.now()
     count = 0
     for job in pending:
         if job.celery_task_id:
             # terminate=True: giết cả job ĐANG cài dở (SIGTERM) chứ không chỉ chặn job
             # chưa khởi chạy — hủy deployment phải dừng được cài đặt đang diễn ra.
             app.control.revoke(job.celery_task_id, terminate=True)
-        job.status = JobStatus.CANCELLED
-        job.finished_at = timezone.now()
-        job.save(update_fields=["status", "finished_at"])
-        count += 1
+        # UPDATE có điều kiện (không phải read-rồi-save) để không ghi đè job vừa được
+        # _run_job chuyển sang SUCCESS/FAILED đúng lúc đang lặp qua danh sách này.
+        count += Job.objects.filter(pk=job.pk).exclude(status__in=terminal).update(
+            status=JobStatus.CANCELLED, finished_at=now
+        )
     clear_slots(deployment.id)
     return count

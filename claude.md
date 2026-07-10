@@ -1,6 +1,18 @@
-# Claude Integration Guide - PyDeploy
+# Claude Integration Guide - RyanDeploy
 
-**Hướng dẫn sử dụng Claude API và Claude Code cho dự án PyDeploy**
+**Hướng dẫn sử dụng Claude API và Claude Code cho dự án RyanDeploy**
+
+---
+
+## ⚠️ Quy tắc làm việc bắt buộc (Claude Code trong repo này)
+
+- Khi thực hiện một kế hoạch/plan nhiều phần (§1, §2, §3... hoặc nhiều bước trong TodoWrite):
+  làm xong **một phần** (đã test/pass) thì **dừng lại**, báo cáo ngắn gọn, và **hỏi user** có
+  muốn làm tiếp phần kế tiếp không — không tự động chạy liền một mạch hết các phần chỉ vì kế
+  hoạch tổng thể đã được duyệt trước đó. Chỉ chạy liên tục nếu user nói rõ "làm hết, không cần
+  hỏi lại" cho lần đó.
+- Xem thêm skill `engineering-discipline` (`.claude/skills/engineering-discipline/SKILL.md`)
+  cho checklist kỷ luật kỹ thuật đầy đủ.
 
 ---
 
@@ -367,7 +379,7 @@ Viết summary 5-10 dòng, chuyên nghiệp, để send cho manager.
 
 ## 🎯 **Prompt Engineering**
 
-### **Best Prompts for PyDeploy**
+### **Best Prompts for RyanDeploy**
 
 #### **1. Deployment Feasibility**
 
@@ -676,7 +688,7 @@ def analyze_deployment(self, deployment_id: int, timeout=30) -> dict:
 ### **1. Django Settings**
 
 ```python
-# backend/pydeploy/settings.py
+# backend/ryandeploy/settings.py
 
 import os
 
@@ -787,7 +799,7 @@ Prompt: "Giúp tôi debug lỗi này: [error message]"
 
 ---
 
-**Prepared for:** PyDeploy Project
+**Prepared for:** RyanDeploy Project
 **Last Updated:** 2024-03-15
 **Version:** 1.0
 

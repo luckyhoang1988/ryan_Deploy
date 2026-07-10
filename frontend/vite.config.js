@@ -11,6 +11,11 @@ export default defineConfig({
         target: "http://localhost:8000",
         changeOrigin: true,
       },
+      // Proxy WebSocket real-time (deployment/job live update) sang backend ASGI (uvicorn).
+      "/ws": {
+        target: "ws://localhost:8000",
+        ws: true,
+      },
     },
   },
 });

@@ -19,4 +19,7 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["gunicorn", "pydeploy.wsgi:application", "--bind", "0.0.0.0:8000"]
+# ASGI (uvicorn, không phải gunicorn+wsgi) — cần cho WebSocket real-time (Channels).
+# Không dùng daphne: daphne ghim twisted[tls]->pyopenssl>=25.2.0, xung đột impacket
+# ghim pyOpenSSL==24.0.0 (xem requirements.txt).
+CMD ["uvicorn", "ryandeploy.asgi:application", "--host", "0.0.0.0", "--port", "8000"]

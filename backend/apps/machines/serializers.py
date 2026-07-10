@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from apps.agents.models import EnrollmentSecret
+
 from .models import ADConfig, Machine, MachineGroup
 
 
@@ -19,7 +21,58 @@ class MachineSerializer(serializers.ModelSerializer):
             "is_online",
             "last_seen",
             "enabled",
+            "connection_mode",
+            "agent_version",
         ]
+        read_only_fields = ["agent_version"]
+
+
+class MachineDetailSerializer(MachineSerializer):
+    """Serializer cho machine detail — thêm trạng thái token agent (không bao giờ lộ token
+    gốc, chỉ prefix + mốc thời gian) để admin theo dõi token 'chết' (agent ngừng poll) hoặc
+    đã bị thu hồi. Tách riêng khỏi MachineSerializer để tránh N+1 query khi list nhiều máy."""
+
+    agent_token = serializers.SerializerMethodField()
+
+    class Meta(MachineSerializer.Meta):
+        fields = MachineSerializer.Meta.fields + ["agent_token"]
+
+    def get_agent_token(self, obj):
+        token = obj.agent_tokens.order_by("-created_at").first()
+        if token is None:
+            return None
+        return {
+            "token_prefix": token.token_prefix,
+            "created_at": token.created_at,
+            "last_used_at": token.last_used_at,
+            "revoked_at": token.revoked_at,
+            "is_active": token.is_active,
+        }
+
+
+class EnrollmentSecretSerializer(serializers.ModelSerializer):
+    """Read-only — tạo/thu hồi secret đi qua action riêng (EnrollmentSecretViewSet), không qua
+    serializer này, vì cần trả raw secret 1 lần và validate expires_in_hours."""
+
+    is_active = serializers.BooleanField(read_only=True)
+    created_by_username = serializers.CharField(source="created_by.username", read_only=True, default=None)
+
+    class Meta:
+        model = EnrollmentSecret
+        fields = [
+            "id",
+            "ad_ou",
+            "secret_prefix",
+            "expires_at",
+            "max_uses",
+            "use_count",
+            "revoked_at",
+            "is_active",
+            "note",
+            "created_at",
+            "created_by_username",
+        ]
+        read_only_fields = fields
 
 
 class ADConfigSerializer(serializers.ModelSerializer):

@@ -3,6 +3,11 @@ from django.db import models
 from apps.core.models import TimeStampedModel
 
 
+class ConnectionMode(models.TextChoices):
+    SMB = "smb", "SMB push (agentless)"
+    AGENT = "agent", "Agent (outbound HTTPS)"
+
+
 class Machine(TimeStampedModel):
     """Một máy trạm Windows trong domain — mục tiêu đẩy phần mềm."""
 
@@ -22,6 +27,12 @@ class Machine(TimeStampedModel):
 
     enabled = models.BooleanField(default=True, help_text="Cho phép đẩy phần mềm tới máy này")
 
+    connection_mode = models.CharField(
+        max_length=8, choices=ConnectionMode.choices, default=ConnectionMode.SMB, db_index=True,
+        help_text="Kênh vận chuyển khi đẩy job: SMB push (server chủ động) hay Agent (máy tự poll qua HTTPS)",
+    )
+    agent_version = models.CharField(max_length=32, blank=True, help_text="Phiên bản agent đang chạy trên máy, do agent tự báo qua heartbeat")
+
     class Meta:
         ordering = ["hostname"]
 
@@ -32,6 +43,28 @@ class Machine(TimeStampedModel):
     def target_address(self):
         """Địa chỉ dùng để kết nối SMB: ưu tiên FQDN, fallback hostname/IP."""
         return self.fqdn or self.hostname or self.ip_address
+
+
+class InstalledSoftware(TimeStampedModel):
+    """
+    Một phần mềm đã cài trên 1 máy — thu từ registry Uninstall keys qua action
+    inventory. Dùng cho conditional targeting ("thiếu Chrome thì cài Chrome").
+    Mỗi lần scan sẽ thay toàn bộ bản ghi của máy đó (xoá cũ, ghi mới).
+    """
+
+    machine = models.ForeignKey(Machine, on_delete=models.CASCADE, related_name="installed_software")
+    name = models.CharField(max_length=512, db_index=True)  # DisplayName
+    version = models.CharField(max_length=128, blank=True)  # DisplayVersion
+    publisher = models.CharField(max_length=255, blank=True)
+    source = models.CharField(max_length=32, default="registry")
+    scanned_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        unique_together = ("machine", "name", "version")
+        indexes = [models.Index(fields=["machine", "name"])]
+
+    def __str__(self):
+        return f"{self.name} {self.version} @ {self.machine.hostname}"
 
 
 class ADConfig(TimeStampedModel):

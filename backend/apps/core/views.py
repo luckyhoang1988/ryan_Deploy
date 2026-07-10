@@ -1,13 +1,20 @@
 from django.contrib.auth import authenticate, login, logout
-from django.db import connection
+from django.contrib.auth.models import User
+from django.db import connection, transaction
+from django.db.models import Q
 from django.middleware.csrf import get_token
-from rest_framework import status
+from rest_framework import status, viewsets
 from rest_framework.decorators import api_view, permission_classes, throttle_classes
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 
-from .permissions import user_roles
+from apps.audit.models import AuditLog
+
+from .permissions import ROLE_ADMIN, IsAdminStrict, has_role, user_roles
+from .serializers import UserSerializer
+from .task_registry import get_task_owner
 
 
 class LoginThrottle(ScopedRateThrottle):
@@ -81,8 +88,16 @@ def task_status(request, task_id):
     """
     Trạng thái một Celery task (cho các tác vụ nền: sync AD, kiểm tra online...).
     Client poll đến khi `ready=true` rồi đọc `result`.
+
+    Chỉ chủ sở hữu task (user đã .delay() nó) hoặc admin mới xem được — task_id không
+    ghi nhận chủ sở hữu (cache miss/hết TTL) cũng bị từ chối với non-admin, tránh lộ
+    kết quả tác vụ nền nhạy cảm (sync AD/LDAP) cho user bất kỳ.
     """
-    from pydeploy.celery import app as celery_app
+    owner_id = get_task_owner(task_id)
+    if not has_role(request.user, ROLE_ADMIN) and owner_id != request.user.id:
+        return Response({"detail": "Không có quyền xem tác vụ này."}, status=status.HTTP_403_FORBIDDEN)
+
+    from ryandeploy.celery import app as celery_app
 
     res = celery_app.AsyncResult(task_id)
     payload = {"task_id": task_id, "state": res.state, "ready": res.ready()}
@@ -115,3 +130,205 @@ def stats(request):
             "jobs_failed": Job.objects.filter(status=JobStatus.FAILED).count(),
         }
     )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def server_stats(request):
+    """CPU/RAM/Disk real-time của chính máy server (host chạy backend)."""
+    import os
+
+    import psutil
+
+    vm = psutil.virtual_memory()
+    disk = psutil.disk_usage("C:\\" if os.name == "nt" else "/")
+    return Response(
+        {
+            "cpu_percent": psutil.cpu_percent(interval=0.1),
+            "cpu_count": psutil.cpu_count() or 1,
+            "ram_percent": vm.percent,
+            "ram_used_gb": round(vm.used / (1024**3), 1),
+            "ram_total_gb": round(vm.total / (1024**3), 1),
+            "disk_percent": disk.percent,
+            "disk_used_gb": round(disk.used / (1024**3), 1),
+            "disk_total_gb": round(disk.total / (1024**3), 1),
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def report(request):
+    """Số liệu chi tiết cho biểu đồ báo cáo trên dashboard.
+
+    Trả về: phân bố trạng thái job/deployment, máy online/offline, và
+    timeline 14 ngày gần nhất (số job hoàn tất mỗi ngày, tách thành công/thất bại).
+    """
+    from datetime import timedelta
+
+    from django.db.models import Count, Q
+    from django.db.models.functions import TruncDate
+    from django.utils import timezone
+
+    from apps.deployments.models import Deployment, DeploymentStatus
+    from apps.jobs.models import Job, JobStatus
+    from apps.machines.models import Machine
+
+    job_raw = {r["status"]: r["c"] for r in Job.objects.values("status").annotate(c=Count("id"))}
+    jobs_by_status = {
+        "success": job_raw.get(JobStatus.SUCCESS, 0) + job_raw.get(JobStatus.SUCCESS_REBOOT, 0),
+        "failed": job_raw.get(JobStatus.FAILED, 0),
+        "running": (
+            job_raw.get(JobStatus.PENDING, 0)
+            + job_raw.get(JobStatus.QUEUED, 0)
+            + job_raw.get(JobStatus.RUNNING, 0)
+        ),
+        "skipped": job_raw.get(JobStatus.SKIPPED, 0),
+        "cancelled": job_raw.get(JobStatus.CANCELLED, 0),
+    }
+
+    dep_raw = {
+        r["status"]: r["c"] for r in Deployment.objects.values("status").annotate(c=Count("id"))
+    }
+    deployments_by_status = {s.value: dep_raw.get(s.value, 0) for s in DeploymentStatus}
+
+    machines_online = Machine.objects.filter(is_online=True).count()
+    machines_total = Machine.objects.count()
+
+    # Timeline 14 ngày: job hoàn tất mỗi ngày (theo finished_at, múi giờ dự án).
+    today = timezone.localdate()
+    start = today - timedelta(days=13)
+    tl_raw = {
+        r["day"]: r
+        for r in (
+            Job.objects.filter(finished_at__date__gte=start)
+            .annotate(day=TruncDate("finished_at"))
+            .values("day")
+            .annotate(
+                success=Count(
+                    "id",
+                    filter=Q(status__in=[JobStatus.SUCCESS, JobStatus.SUCCESS_REBOOT]),
+                ),
+                failed=Count("id", filter=Q(status=JobStatus.FAILED)),
+            )
+        )
+    }
+    timeline = []
+    for i in range(14):
+        d = start + timedelta(days=i)
+        row = tl_raw.get(d)
+        timeline.append(
+            {
+                "date": d.isoformat(),
+                "success": row["success"] if row else 0,
+                "failed": row["failed"] if row else 0,
+            }
+        )
+
+    return Response(
+        {
+            "jobs_by_status": jobs_by_status,
+            "deployments_by_status": deployments_by_status,
+            "machines": {
+                "online": machines_online,
+                "offline": machines_total - machines_online,
+            },
+            "timeline": timeline,
+        }
+    )
+
+
+class UserViewSet(viewsets.ModelViewSet):
+    """
+    Quản lý người dùng + vai trò (RBAC). Chỉ admin thao tác.
+    Có bảo vệ chống tự khoá mình và chống hạ/xoá admin cuối cùng (tránh mất quyền vào hệ thống).
+    """
+
+    queryset = User.objects.all().order_by("username").prefetch_related("groups")
+    serializer_class = UserSerializer
+    permission_classes = [IsAdminStrict]
+
+    @staticmethod
+    def _is_admin_capable(user, *, is_active=None, role=None):
+        """User còn quyền admin và đang bật? role/is_active cho phép dự đoán trạng thái sau khi sửa."""
+        active = user.is_active if is_active is None else is_active
+        if not active:
+            return False
+        if user.is_superuser:
+            return True
+        if role is not None:
+            return role == ROLE_ADMIN
+        return user.groups.filter(name=ROLE_ADMIN).exists()
+
+    def _locked_admin_capable(self):
+        """
+        Khoá (select_for_update) toàn bộ user admin-capable HIỆN TẠI theo pk — dùng để
+        tuần tự hoá 2 request hạ quyền/xoá admin cuối cùng chạy đồng thời (TOCTOU race).
+        Query id trước rồi khoá theo pk__in (tránh lỗi Postgres "SELECT FOR UPDATE không
+        cho phép với DISTINCT" do join qua groups__name). Trả về list User object MỚI đọc
+        sau khi giành lock — phản ánh đúng trạng thái đã commit của giao dịch chạy trước,
+        không phải state đọc trước khi khoá.
+
+        Lưu ý: SQLite (dùng cho test) không hỗ trợ SELECT FOR UPDATE — Django âm thầm bỏ
+        qua khoá thay vì raise lỗi, nên test chỉ xác nhận code path chạy đúng, KHÔNG chứng
+        minh được race thật sự bị chặn (production dùng PostgreSQL, có khoá thật).
+        """
+        admin_ids = list(
+            User.objects.filter(is_active=True)
+            .filter(Q(is_superuser=True) | Q(groups__name=ROLE_ADMIN))
+            .values_list("pk", flat=True)
+            .distinct()
+        )
+        if not admin_ids:
+            return []
+        return list(User.objects.select_for_update().filter(pk__in=admin_ids).order_by("pk"))
+
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        new_active = serializer.validated_data.get("is_active", instance.is_active)
+        new_role = serializer.validated_data.get("role")  # None nếu không đổi
+        was_admin = self._is_admin_capable(instance)
+        will_be_admin = self._is_admin_capable(instance, is_active=new_active, role=new_role)
+        if was_admin and not will_be_admin:
+            with transaction.atomic():
+                locked = self._locked_admin_capable()
+                other_admins = [
+                    u for u in locked if u.pk != instance.pk and self._is_admin_capable(u)
+                ]
+                if not other_admins:
+                    raise ValidationError(
+                        "Không thể hạ quyền/khoá admin cuối cùng — hệ thống sẽ mất quản trị."
+                    )
+                serializer.save()
+        else:
+            serializer.save()
+        AuditLog.record(
+            AuditLog.Action.USER_UPDATE,
+            user=self.request.user,
+            target=instance,
+            role=new_role,
+            is_active=new_active,
+        )
+
+    def perform_destroy(self, instance):
+        if instance.pk == self.request.user.pk:
+            raise ValidationError("Không thể xoá chính tài khoản đang đăng nhập.")
+        username = instance.username
+        if self._is_admin_capable(instance):
+            with transaction.atomic():
+                locked = self._locked_admin_capable()
+                other_admins = [
+                    u for u in locked if u.pk != instance.pk and self._is_admin_capable(u)
+                ]
+                if not other_admins:
+                    raise ValidationError("Không thể xoá admin cuối cùng.")
+                # Ghi log TRƯỚC khi xoá để giữ được pk/username trong bản ghi kiểm toán.
+                AuditLog.record(
+                    AuditLog.Action.USER_DELETE, user=self.request.user, target=instance, username=username
+                )
+                instance.delete()
+        else:
+            AuditLog.record(
+                AuditLog.Action.USER_DELETE, user=self.request.user, target=instance, username=username
+            )
+            instance.delete()

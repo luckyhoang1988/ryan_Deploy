@@ -24,7 +24,7 @@ export default function Login() {
   return (
     <div className="login-wrap">
       <form className="login-box" onSubmit={submit}>
-        <h1>PyDeploy</h1>
+        <h1>RyanDeploy</h1>
         <p className="muted">Đăng nhập để quản lý triển khai</p>
         <label>Tài khoản</label>
         <input value={username} onChange={(e) => setUsername(e.target.value)} autoFocus />

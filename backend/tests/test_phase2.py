@@ -113,20 +113,109 @@ def test_sync_ad_dispatches_async_and_audits(admin_client):
     assert AuditLog.objects.filter(action=AuditLog.Action.MACHINE_SYNC).exists()
 
 
-def test_check_online_dispatches_async(admin_client, monkeypatch):
-    # refresh thật sẽ ping/SMB + ghi DB trong ThreadPool → dưới SQLite test bị khóa bảng;
-    # ở đây chỉ kiểm luồng async + endpoint task-status nên thay bằng no-op (không chạm DB).
-    from apps.machines import tasks as m_tasks
+def test_disabling_machine_clears_stale_is_online(admin_client):
+    m = Machine.objects.create(hostname="PC-STALE-1", enabled=True, is_online=True)
+    r = admin_client.patch(
+        f"/api/machines/{m.id}/", {"enabled": False}, content_type="application/json"
+    )
+    assert r.status_code == 200
+    m.refresh_from_db()
+    assert m.enabled is False
+    assert m.is_online is False
 
-    monkeypatch.setattr(m_tasks, "refresh_machine_status", lambda m: False)
-    Machine.objects.create(hostname="PC-ONLINE-1", enabled=True)
-    r = admin_client.post("/api/machines/check_online/", {}, content_type="application/json")
-    assert r.status_code == 202
-    task_id = r.json()["task_id"]
 
-    t = admin_client.get(f"/api/tasks/{task_id}/").json()
-    assert t["ready"] is True
-    assert t["result"]["checked"] == 1
+# ---------------- mark_stale_machines_offline (agent là nguồn duy nhất báo online) ----------------
+
+
+def test_mark_stale_machines_offline_flips_expired_heartbeat(db, settings):
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from apps.machines.tasks import mark_stale_machines_offline
+
+    settings.RYANDEPLOY = {**settings.RYANDEPLOY, "AGENT_OFFLINE_THRESHOLD": 900}
+    stale = Machine.objects.create(
+        hostname="PC-STALE-AGENT", enabled=True, is_online=True,
+        last_seen=timezone.now() - timedelta(seconds=901),
+    )
+    fresh = Machine.objects.create(
+        hostname="PC-FRESH-AGENT", enabled=True, is_online=True,
+        last_seen=timezone.now() - timedelta(seconds=10),
+    )
+    never_seen = Machine.objects.create(hostname="PC-NEVER-SEEN", enabled=True, is_online=True)
+
+    result = mark_stale_machines_offline()
+
+    assert result == {"marked_offline": 2}
+    stale.refresh_from_db()
+    fresh.refresh_from_db()
+    never_seen.refresh_from_db()
+    assert stale.is_online is False
+    assert fresh.is_online is True
+    assert never_seen.is_online is False
+
+
+def test_mark_stale_machines_offline_ignores_already_offline(db, settings):
+    from apps.machines.tasks import mark_stale_machines_offline
+
+    Machine.objects.create(hostname="PC-ALREADY-OFF", enabled=True, is_online=False)
+
+    result = mark_stale_machines_offline()
+
+    assert result == {"marked_offline": 0}
+
+
+def test_updating_other_field_does_not_touch_is_online(admin_client):
+    m = Machine.objects.create(hostname="PC-STALE-2", enabled=True, is_online=True)
+    r = admin_client.patch(
+        f"/api/machines/{m.id}/", {"os_name": "Windows 11"}, content_type="application/json"
+    )
+    assert r.status_code == 200
+    m.refresh_from_db()
+    assert m.is_online is True
+
+
+# ---------------- 2.2b trigger/cancel: claim nguyên tử chỉ 1 caller thắng ----------------
+
+
+def test_trigger_atomic_claim_only_one_caller_wins(package_version, credential):
+    # Audit finding "Race condition trigger thủ công": 2 request POST /trigger/ đồng thời
+    # (double-click) không được cùng chuyển deployment sang RUNNING. Test trực tiếp câu
+    # UPDATE có điều kiện dùng trong views.py (mô phỏng 2 caller race nhau) — không dựng
+    # thread thật vì SQLite test không chịu được ghi đa luồng (xem LESSONS.md).
+    dep = Deployment.objects.create(name="D", package_version=package_version, credential=credential)
+
+    first = (
+        Deployment.objects.filter(pk=dep.pk)
+        .exclude(status=DeploymentStatus.RUNNING)
+        .update(status=DeploymentStatus.RUNNING)
+    )
+    second = (
+        Deployment.objects.filter(pk=dep.pk)
+        .exclude(status=DeploymentStatus.RUNNING)
+        .update(status=DeploymentStatus.RUNNING)
+    )
+
+    assert (first, second) == (1, 0)
+
+
+def test_cancel_atomic_claim_only_one_caller_wins(package_version, credential):
+    dep = _make_deployment(package_version, credential, "D2", [JobStatus.RUNNING])
+    Deployment.objects.filter(pk=dep.pk).update(status=DeploymentStatus.RUNNING)
+
+    first = (
+        Deployment.objects.filter(
+            pk=dep.pk, status__in=[DeploymentStatus.SCHEDULED, DeploymentStatus.RUNNING]
+        ).update(status=DeploymentStatus.CANCELLED)
+    )
+    second = (
+        Deployment.objects.filter(
+            pk=dep.pk, status__in=[DeploymentStatus.SCHEDULED, DeploymentStatus.RUNNING]
+        ).update(status=DeploymentStatus.CANCELLED)
+    )
+
+    assert (first, second) == (1, 0)
 
 
 # ---------------- 2.3 cancel terminate ----------------
@@ -139,7 +228,7 @@ def test_cancel_revokes_with_terminate(package_version, credential, monkeypatch)
     job.save(update_fields=["celery_task_id"])
 
     calls = []
-    from pydeploy.celery import app
+    from ryandeploy.celery import app
 
     monkeypatch.setattr(app.control, "revoke", lambda tid, **kw: calls.append((tid, kw)))
     monkeypatch.setattr(orchestrator, "clear_slots", lambda _id: None)
@@ -151,11 +240,71 @@ def test_cancel_revokes_with_terminate(package_version, credential, monkeypatch)
     assert job.status == JobStatus.CANCELLED
 
 
+def test_cancel_deployment_does_not_overwrite_job_finished_concurrently(
+    package_version, credential, monkeypatch
+):
+    # Audit finding "Cancel bị ghi đè bởi RUNNING": trước fix, cancel_deployment() đọc
+    # danh sách job "chưa kết thúc" rồi ghi CANCELLED vô điều kiện — nếu 1 worker khác
+    # ghi SUCCESS đúng lúc đang lặp (vd ngay trong lúc revoke()), CANCELLED sẽ ghi đè
+    # SUCCESS. Sau fix: UPDATE có điều kiện loại trừ job đã terminal → không ghi đè.
+    dep = _make_deployment(package_version, credential, "RaceCancel", [JobStatus.RUNNING])
+    job = dep.jobs.first()
+    job.celery_task_id = "task-race"
+    job.save(update_fields=["celery_task_id"])
+
+    from ryandeploy.celery import app
+
+    def fake_revoke(tid, **kw):
+        # Giả lập worker khác vừa ghi xong SUCCESS đúng lúc cancel_deployment() đang xử lý
+        # job này (cửa sổ giữa lúc build danh sách "pending" và lúc ghi CANCELLED).
+        Job.objects.filter(pk=job.pk).update(status=JobStatus.SUCCESS, finished_at=None)
+
+    monkeypatch.setattr(app.control, "revoke", fake_revoke)
+    monkeypatch.setattr(orchestrator, "clear_slots", lambda _id: None)
+
+    count = orchestrator.cancel_deployment(dep)
+
+    job.refresh_from_db()
+    assert job.status == JobStatus.SUCCESS  # KHÔNG bị lật ngược thành CANCELLED
+    assert count == 0
+
+
+def test_write_job_result_skips_when_job_already_cancelled(package_version, credential):
+    # Audit finding "Cancel bị ghi đè bởi RUNNING": _run_job trước fix ghi SUCCESS/FAILED
+    # vô điều kiện sau executor.run(), có thể ghi đè CANCELLED do cancel_deployment() vừa
+    # đặt. _write_job_result() phải từ chối ghi khi job đã CANCELLED.
+    from apps.jobs.tasks import _write_job_result
+
+    dep = _make_deployment(package_version, credential, "RaceRunJob", [JobStatus.RUNNING])
+    job = dep.jobs.first()
+    Job.objects.filter(pk=job.pk).update(status=JobStatus.CANCELLED)
+
+    ok = _write_job_result(job, status=JobStatus.SUCCESS, exit_code=0)
+
+    assert ok is False
+    job.refresh_from_db()
+    assert job.status == JobStatus.CANCELLED
+
+
+def test_write_job_result_writes_when_not_cancelled(package_version, credential):
+    from apps.jobs.tasks import _write_job_result
+
+    dep = _make_deployment(package_version, credential, "NoRaceRunJob", [JobStatus.RUNNING])
+    job = dep.jobs.first()
+
+    ok = _write_job_result(job, status=JobStatus.SUCCESS, exit_code=0)
+
+    assert ok is True
+    job.refresh_from_db()
+    assert job.status == JobStatus.SUCCESS
+
+
 # ---------------- 2.4 finalize all-cancelled + reconcile ----------------
 
 
 def test_finalize_all_cancelled_is_cancelled(package_version, credential):
     dep = _make_deployment(package_version, credential, "AllCancel", [JobStatus.CANCELLED, JobStatus.CANCELLED])
+    Deployment.objects.filter(id=dep.id).update(status=DeploymentStatus.RUNNING)
     finalize_deployment(None, dep.id)
     dep.refresh_from_db()
     assert dep.status == DeploymentStatus.CANCELLED
@@ -167,7 +316,7 @@ def test_reconcile_finalizes_stuck_running(package_version, credential):
 
     result = dep_tasks.reconcile_stuck_deployments()
 
-    assert result == {"reconciled": 1}
+    assert result == {"reconciled": 1, "failed": 0, "stale_jobs_failed": 0, "agent_queued_failed": 0}
     dep.refresh_from_db()
     assert dep.status == DeploymentStatus.COMPLETED
 
@@ -178,6 +327,6 @@ def test_reconcile_skips_active_running(package_version, credential):
 
     result = dep_tasks.reconcile_stuck_deployments()
 
-    assert result == {"reconciled": 0}
+    assert result == {"reconciled": 0, "failed": 0, "stale_jobs_failed": 0, "agent_queued_failed": 0}
     dep.refresh_from_db()
     assert dep.status == DeploymentStatus.RUNNING  # còn job RUNNING → để yên

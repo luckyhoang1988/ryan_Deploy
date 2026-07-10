@@ -1,4 +1,4 @@
-# PyDeploy
+# RyanDeploy
 
 Nền tảng **đẩy phần mềm agentless** kiểu PDQ Deploy cho môi trường Active Directory domain.
 Server đẩy `.msi/.exe` xuống máy trạm và cài đặt silent **mà không cần remote thủ công vào từng máy**, hỗ trợ **đẩy song song nhiều máy cùng lúc**.
@@ -33,7 +33,7 @@ Web/API → Django (DRF) → PostgreSQL
 
 ```
 backend/
-  pydeploy/            # Django project (settings tách base/dev/prod/test, celery)
+  ryandeploy/            # Django project (settings tách base/dev/prod/test, celery)
   apps/
     core/              # base model, healthcheck, auth (login/me), RBAC permissions, stats
     credentials/       # DeployCredential + vault Fernet (mã hóa at-rest)
@@ -78,7 +78,7 @@ Cấu hình `AD_SERVER / AD_BASE_DN / AD_BIND_USER / AD_BIND_PASSWORD` trong `.e
 cp .env.example .env
 # Sinh VAULT_KEY (khóa mã hóa credential):
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-# → dán vào PYDEPLOY_VAULT_KEY trong .env
+# → dán vào RYANDEPLOY_VAULT_KEY trong .env
 
 docker compose up --build
 # API: http://localhost:8000/api/health/
@@ -91,10 +91,12 @@ docker compose exec web python manage.py createsuperuser
 cd backend
 python -m venv .venv && .venv\Scripts\activate      # Windows
 pip install -r requirements.txt
-set DJANGO_SETTINGS_MODULE=pydeploy.settings.dev     # cần Postgres + Redis đang chạy
+set DJANGO_SETTINGS_MODULE=ryandeploy.settings.dev     # cần Postgres + Redis đang chạy
 python manage.py migrate
-python manage.py runserver
-celery -A pydeploy worker -l info                     # terminal khác
+uvicorn ryandeploy.asgi:application --reload            # KHÔNG dùng "manage.py runserver" —
+                                                          # đó là WSGI thuần, không phục vụ được
+                                                          # WebSocket real-time (/ws/updates/)
+celery -A ryandeploy worker -l info                     # terminal khác
 ```
 
 ## Quy trình sử dụng (qua Django admin / API)
@@ -116,9 +118,11 @@ celery -A pydeploy worker -l info                     # terminal khác
 - `manage.py check` — no issues.
 - `makemigrations` + `migrate` (sqlite test settings) — OK.
 - Smoke test: vault roundtrip, repository detect/checksum, executor path + `{file}` substitution — PASS.
-- **pytest: 24/24 PASS** — vault, repository + verify_integrity (chống tamper), executor path/command,
-  permissions/RBAC, và API (login, stats, credential mã hóa + không lộ password, viewer bị chặn 403, chặn ẩn danh).
-  Chạy: `cd backend && pytest` (cài `pip install -r requirements-dev.txt`).
+- **pytest: 77/77 PASS** — vault, repository + verify_integrity (chống tamper), executor
+  path/command + DNS precheck + phân loại lỗi auth/hủy, permissions/RBAC (gồm nhóm máy),
+  semaphore concurrency, scheduling/reconcile (kẹt RUNNING, timeout), log JSON, và API
+  (login, stats, credential mã hóa + audit create/update/delete, viewer bị chặn 403, chặn ẩn danh).
+  Chạy: `cd backend && DJANGO_SETTINGS_MODULE=ryandeploy.settings.test pytest` (cài `pip install -r requirements-dev.txt`).
 - Frontend `npm run build` — build thành công (0 lỗi).
 
 > Test **end-to-end đẩy thật** cần 1 máy Windows lab trong domain (xem mục Verification #1/#2 trong plan) — chưa chạy trong môi trường này vì không có máy đích.

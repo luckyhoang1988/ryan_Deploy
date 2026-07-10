@@ -1,0 +1,19 @@
+# Override cho triển khai host thật: restart policy, phục vụ staticfiles cho admin,
+# và web tự migrate khi khởi động (idempotent).
+services:
+  postgres:
+    restart: unless-stopped
+  redis:
+    restart: unless-stopped
+  web:
+    restart: unless-stopped
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py collectstatic --noinput &&
+             uvicorn ryandeploy.asgi:application --host 0.0.0.0 --port 8000 --workers 3"
+    volumes:
+      - ./staticfiles:/app/staticfiles
+  worker:
+    restart: unless-stopped
+  beat:
+    restart: unless-stopped

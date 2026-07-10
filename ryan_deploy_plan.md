@@ -1,4 +1,4 @@
-# Kế hoạch triển khai PyDeploy — Nền tảng đẩy phần mềm agentless kiểu PDQ Deploy
+# Kế hoạch triển khai RyanDeploy — Nền tảng đẩy phần mềm agentless kiểu PDQ Deploy
 
 ## Context (Bối cảnh & lý do)
 
@@ -21,7 +21,7 @@ Thư mục `ryan_deploy` hiện **chỉ có `claude.md`** — dự án greenfiel
 
 ```
                     ┌─────────────────────────────────────────┐
-                    │            PyDeploy Server                │
+                    │            RyanDeploy Server                │
                     │  (domain-joined hoặc có domain creds)     │
                     │                                           │
    Web UI  ───────► │  Django REST API                          │
@@ -48,7 +48,7 @@ Thư mục `ryan_deploy` hiện **chỉ có `claude.md`** — dự án greenfiel
 
 **Tech stack:** Python 3.12 · Django 5 + DRF · Celery + Redis · PostgreSQL · impacket (executor) · ldap3 (AD discovery) · cryptography/Fernet (credential vault) · React + Vite (UI) · Docker Compose (đóng gói).
 
-**Giả định hạ tầng (mặc định, có thể đổi):** Server chạy trên 1 máy có line-of-sight mạng tới máy trạm + mở SMB 445; xác thực NTLM/Kerberos bằng service account `DOMAIN\svc_pydeploy` là **local admin trên máy trạm** (qua GPO/Restricted Groups). Không cần domain-join server nếu dùng NTLM.
+**Giả định hạ tầng (mặc định, có thể đổi):** Server chạy trên 1 máy có line-of-sight mạng tới máy trạm + mở SMB 445; xác thực NTLM/Kerberos bằng service account `DOMAIN\svc_ryandeploy` là **local admin trên máy trạm** (qua GPO/Restricted Groups). Không cần domain-join server nếu dùng NTLM.
 
 ---
 
@@ -56,7 +56,7 @@ Thư mục `ryan_deploy` hiện **chỉ có `claude.md`** — dự án greenfiel
 
 ### Phase 0 — Nền móng & scaffolding hạ tầng
 **Mục tiêu:** Dựng khung dự án chạy được, môi trường dev đồng nhất.
-- Khởi tạo repo (git init), cấu trúc `backend/` (Django project `pydeploy`), `apps/` skeleton.
+- Khởi tạo repo (git init), cấu trúc `backend/` (Django project `ryandeploy`), `apps/` skeleton.
 - `docker-compose.yml`: dịch vụ `web` (Django), `worker` (Celery), `redis`, `postgres`.
 - `requirements.txt`: django, djangorestframework, celery, redis, psycopg, impacket, ldap3, cryptography, python-dotenv.
 - `.env.example` + settings tách theo môi trường (`settings/base.py`, `dev.py`, `prod.py`).
@@ -85,7 +85,7 @@ Thư mục `ryan_deploy` hiện **chỉ có `claude.md`** — dự án greenfiel
 - Module `apps/executor/push_executor.py`, class `PushExecutor` — flow cho MỖI máy đích:
   1. **Pre-check:** resolve FQDN, kiểm tra SMB 445 mở, đủ dung lượng đĩa.
   2. **Auth:** NTLM/Kerberos bằng `DOMAIN\user` + password (impacket `SMBConnection`).
-  3. **Copy:** kết nối `ADMIN$` (= `C:\Windows`), tạo `C:\Windows\PyDeploy\Runner\{job_id}\exec\`, upload installer + wrapper `run.bat`/`.ps1` (chạy silent install, ghi exit code + stdout/stderr ra file kết quả).
+  3. **Copy:** kết nối `ADMIN$` (= `C:\Windows`), tạo `C:\Windows\RyanDeploy\Runner\{job_id}\exec\`, upload installer + wrapper `run.bat`/`.ps1` (chạy silent install, ghi exit code + stdout/stderr ra file kết quả).
   4. **Remote exec:** tạo **Windows Service tạm** qua MS-SCMR (impacket `scmr`) trỏ tới wrapper, chạy dưới `LocalSystem` → start service. (Phương án dự phòng: Scheduled Task qua `tsch`.)
   5. **Poll kết quả:** đọc file kết quả về qua SMB → parse exit code + log.
   6. **Cleanup:** stop + delete service, xóa thư mục/file trên máy đích.
@@ -140,7 +140,7 @@ Thư mục `ryan_deploy` hiện **chỉ có `claude.md`** — dự án greenfiel
 
 ## Verification (cách kiểm thử end-to-end)
 
-1. **Executor lõi (Phase 3):** Trong lab, chạy `PushExecutor.run(job)` với 1 `.msi` (VD 7-Zip) + 1 `.exe` silent → xác nhận: phần mềm xuất hiện trong Programs, exit code 0/3010, và **máy đích sạch** (không còn service `PyDeployRunner`/thư mục tạm).
+1. **Executor lõi (Phase 3):** Trong lab, chạy `PushExecutor.run(job)` với 1 `.msi` (VD 7-Zip) + 1 `.exe` silent → xác nhận: phần mềm xuất hiện trong Programs, exit code 0/3010, và **máy đích sạch** (không còn service `RyanDeployRunner`/thư mục tạm).
 2. **Song song (Phase 4):** Deploy 1 package tới ≥5 máy đồng thời; 1 máy tắt → job đó retry, các máy khác vẫn thành công.
 3. **AD sync (Phase 5):** Sync 1 OU → số máy khớp AD; deploy bằng cách chọn nhóm.
 4. **UI (Phase 6):** Toàn bộ luồng upload → chọn máy → deploy → theo dõi log chỉ bằng UI.
@@ -154,7 +154,7 @@ Thư mục `ryan_deploy` hiện **chỉ có `claude.md`** — dự án greenfiel
 
 | Phase | Trạng thái | Thành phần chính |
 |-------|-----------|------------------|
-| 0 Scaffolding | ✅ | `backend/pydeploy` (settings base/dev/prod/test), `docker-compose.yml`, healthcheck |
+| 0 Scaffolding | ✅ | `backend/ryandeploy` (settings base/dev/prod/test), `docker-compose.yml`, healthcheck |
 | 1 Models | ✅ | packages, machines, deployments, jobs, credentials, audit + migrations + admin |
 | 2 Repository & Vault | ✅ | `packages/repository.py` (SHA-256, detect, silent switch), `credentials/vault.py` (Fernet) |
 | 3 PushExecutor | ✅ | `apps/executor/push_executor.py` (SMB ADMIN$ + SCMR service + poll + cleanup) |

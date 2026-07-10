@@ -1,14 +1,25 @@
 """Celery tasks cấp deployment (khác apps/jobs/tasks.py là cấp từng job)."""
 import logging
+from datetime import timedelta
 
 from celery import shared_task
 from django.db import transaction
 from django.utils import timezone
 
-from .models import Deployment, DeploymentStatus
+from .models import Deployment, DeploymentSchedule, DeploymentStatus
 from .orchestrator import launch_deployment
 
 logger = logging.getLogger("apps.deployments")
+
+# Deployment RUNNING mà quá lâu vẫn CHƯA có job nào (launch chết giữa chừng, hoặc process
+# bị kill sau khi claim SCHEDULED→RUNNING nhưng trước khi tạo job) → coi là kẹt, đánh FAILED.
+# launch tạo job trong vài giây nên ngưỡng này chỉ chạm khi thực sự có sự cố.
+_STUCK_NO_JOB_SECONDS = 600  # 10 phút
+
+# Job RUNNING quá job_timeout + khoảng dư này mà vẫn chưa terminal → nghi worker crash
+# giữa chừng (acks_late redeliver thấy claim fail, coi là "đã xử lý" rồi return êm — không
+# ai từng ghi FAILED). Khớp ttl = _job_timeout() + 300 đã dùng ở deploy_to_machine.
+_STUCK_JOB_GRACE_SECONDS = 300
 
 
 @shared_task
@@ -31,16 +42,28 @@ def trigger_scheduled_deployments():
 
     launched = 0
     for dep_id in due_ids:
-        # Claim nguyên tử: chỉ đúng 1 tiến trình đổi được SCHEDULED→RUNNING.
+        # Claim nguyên tử: chỉ đúng 1 tiến trình đổi được SCHEDULED→RUNNING. Đặt luôn
+        # started_at làm mốc "RUNNING từ lúc" tin cậy để reconcile phát hiện kẹt (claim
+        # bằng .update() không kích hoạt auto_now nên không dựa được vào updated_at).
         with transaction.atomic():
             claimed = (
                 Deployment.objects.filter(id=dep_id, status=DeploymentStatus.SCHEDULED)
-                .update(status=DeploymentStatus.RUNNING)
+                .update(status=DeploymentStatus.RUNNING, started_at=now)
             )
         if not claimed:
             continue
         deployment = Deployment.objects.get(id=dep_id)
-        count = launch_deployment(deployment)
+        # launch_deployment có thể ném lỗi (DB, broker Celery…) giữa lúc đã RUNNING → phải
+        # revert về FAILED, nếu không deployment kẹt RUNNING vĩnh viễn (reconcile bỏ qua
+        # case chưa có job trong thời gian gia hạn).
+        try:
+            count = launch_deployment(deployment)
+        except Exception:
+            logger.exception("launch_deployment lỗi cho %s → đánh FAILED", dep_id)
+            deployment.status = DeploymentStatus.FAILED
+            deployment.finished_at = timezone.now()
+            deployment.save(update_fields=["status", "finished_at"])
+            continue
         if count == 0:
             # Không có máy đích enabled → không có gì để chạy, đóng lại tránh kẹt RUNNING.
             deployment.status = DeploymentStatus.COMPLETED
@@ -62,8 +85,31 @@ def reconcile_stuck_deployments():
     deployment sẽ kẹt ở RUNNING vĩnh viễn. Task này quét các deployment RUNNING mà
     MỌI job đã ở trạng thái kết thúc rồi gọi finalize để tổng kết lại.
     """
+    from django.conf import settings
+
+    from apps.deployments.semaphore import release_slot
     from apps.jobs.models import Job, JobStatus
-    from apps.jobs.tasks import finalize_deployment
+    from apps.jobs.tasks import _cleanup_target_residue, _job_timeout, finalize_deployment
+    from apps.machines.models import ConnectionMode
+
+    # Job của máy connection_mode=agent ở QUEUED quá lâu mà agent chưa từng poll tới (agent
+    # offline/chưa cài) — không có chord/task nào theo dõi job QUEUED chưa claim (khác SMB,
+    # nơi deploy_to_machine tự lo qua Celery retry), nên phải tự đánh FAILED ở đây để không
+    # kẹt vô thời hạn. Job QUEUED chưa claim thì chưa từng xin slot semaphore → không cần
+    # release_slot (đối xứng với việc chỉ AgentJobPollView xin slot lúc claim thành công).
+    agent_queue_timeout = settings.RYANDEPLOY.get("AGENT_JOB_QUEUE_TIMEOUT", 3600)
+    queued_cutoff = timezone.now() - timedelta(seconds=agent_queue_timeout)
+    agent_queued_failed = 0
+    for job in Job.objects.filter(
+        status=JobStatus.QUEUED, machine__connection_mode=ConnectionMode.AGENT, created_at__lt=queued_cutoff,
+    ):
+        updated = Job.objects.filter(pk=job.pk, status=JobStatus.QUEUED).update(
+            status=JobStatus.FAILED,
+            error_output="Agent chưa từng poll job này quá hạn — nghi agent offline/chưa cài đặt.",
+            finished_at=timezone.now(),
+        )
+        if updated:
+            agent_queued_failed += 1
 
     terminal = [
         JobStatus.SUCCESS,
@@ -72,17 +118,129 @@ def reconcile_stuck_deployments():
         JobStatus.SKIPPED,
         JobStatus.CANCELLED,
     ]
+    now = timezone.now()
+    stale_cutoff = now - timedelta(seconds=_job_timeout() + _STUCK_JOB_GRACE_SECONDS)
     reconciled = 0
-    for dep_id in Deployment.objects.filter(status=DeploymentStatus.RUNNING).values_list(
-        "id", flat=True
-    ):
+    failed = 0
+    stale_jobs_failed = 0
+    for dep_id, started_at in Deployment.objects.filter(
+        status=DeploymentStatus.RUNNING
+    ).values_list("id", "started_at"):
         jobs = Job.objects.filter(deployment_id=dep_id)
         if not jobs.exists():
-            continue  # vừa chuyển RUNNING, job chưa kịp tạo → để yên
+            # Bình thường job xuất hiện trong vài giây. Nếu đã RUNNING quá lâu mà vẫn
+            # chưa có job → launch chết giữa chừng / process bị kill sau khi claim →
+            # đánh FAILED để không kẹt vĩnh viễn. Trong thời gian gia hạn thì để yên.
+            age = (now - started_at).total_seconds() if started_at else None
+            if age is not None and age > _STUCK_NO_JOB_SECONDS:
+                Deployment.objects.filter(id=dep_id).update(
+                    status=DeploymentStatus.FAILED, finished_at=now
+                )
+                failed += 1
+                logger.warning(
+                    "Reconcile: deployment %s RUNNING %.0fs mà chưa có job → FAILED", dep_id, age
+                )
+            continue
+
+        # Job "ma": worker crash giữa lúc job đã claim RUNNING — acks_late redeliver thấy
+        # claim fail (job không còn QUEUED) và coi là "đã xử lý", return êm mà không ai
+        # từng ghi FAILED. Không có watchdog thì job này (và deployment chứa nó) kẹt
+        # RUNNING vĩnh viễn — tự đánh FAILED nếu đã quá hạn rõ ràng trước khi xét terminal.
+        # select_related: cần machine.connection_mode + credential để dọn residue SMB (nếu có).
+        stale_qs = jobs.filter(status=JobStatus.RUNNING, started_at__lt=stale_cutoff).select_related(
+            "machine", "deployment__credential",
+        )
+        for job in stale_qs:
+            updated = Job.objects.filter(pk=job.pk, status=JobStatus.RUNNING).update(
+                status=JobStatus.FAILED,
+                error_output=(
+                    "Job kẹt RUNNING quá timeout — nghi worker crash giữa chừng, "
+                    "watchdog tự đánh FAILED."
+                ),
+                finished_at=now,
+            )
+            if updated:
+                release_slot(dep_id)  # job có thể đang giữ slot semaphore, phải nhả
+                # SMB: start() có thể đã tạo service/file tạm mà không ai poll_once để dọn.
+                # Agent: không dùng PushExecutor — không có residue SMB cần dọn.
+                if job.machine.connection_mode == ConnectionMode.SMB and job.deployment.credential_id:
+                    _cleanup_target_residue(
+                        job, job.machine, job.deployment.credential, f"job{job.pk}",
+                    )
+                stale_jobs_failed += 1
+                logger.warning(
+                    "Reconcile: job %s (deployment %s) kẹt RUNNING quá timeout → FAILED",
+                    job.pk, dep_id,
+                )
+
         if jobs.exclude(status__in=terminal).exists():
             continue  # còn job đang chạy → chưa xong, không đụng
         finalize_deployment(None, dep_id)
         reconciled += 1
         logger.info("Reconcile: tổng kết lại deployment kẹt RUNNING %s", dep_id)
 
-    return {"reconciled": reconciled}
+    return {
+        "reconciled": reconciled, "failed": failed, "stale_jobs_failed": stale_jobs_failed,
+        "agent_queued_failed": agent_queued_failed,
+    }
+
+
+@shared_task
+def trigger_due_schedules():
+    """
+    Beat task (mỗi phút): kích hoạt các DeploymentSchedule (lịch lặp interval/weekly) đã
+    tới giờ. Khác với `trigger_scheduled_deployments` (chạy đúng 1 lần cho CHÍNH deployment
+    đó), ở đây mỗi lần tới giờ sẽ CLONE thành 1 Deployment MỚI (spawn_deployment) rồi launch
+    — giữ đầy đủ lịch sử job/audit từng lần chạy.
+    """
+    now = timezone.now()
+    triggered = 0
+
+    for sched in DeploymentSchedule.objects.filter(enabled=True):
+        # select_for_update + re-check is_due TRONG lock: nếu lần chạy trước của beat task
+        # (vd worker chậm) còn chồng lấn lần này, chỉ 1 trong 2 thấy is_due()==True sau khi
+        # lock (last_triggered_at đã được lần kia cập nhật) → tránh kích hoạt trùng.
+        with transaction.atomic():
+            locked = (
+                DeploymentSchedule.objects.select_for_update()
+                .filter(pk=sched.pk, enabled=True)
+                .first()
+            )
+            if locked is None or not locked.is_due(now):
+                continue
+            previous_triggered_at = locked.last_triggered_at
+            locked.last_triggered_at = now
+            locked.save(update_fields=["last_triggered_at", "updated_at"])
+
+        deployment = locked.spawn_deployment(now)
+        try:
+            job_count = launch_deployment(deployment)
+        except Exception:
+            logger.exception(
+                "launch_deployment lỗi cho schedule %s → đánh FAILED", locked.pk
+            )
+            deployment.status = DeploymentStatus.FAILED
+            deployment.finished_at = timezone.now()
+            deployment.save(update_fields=["status", "finished_at"])
+            # Launch thất bại → coi như CHƯA kích hoạt: trả lại last_triggered_at để lịch
+            # được thử lại ở tick kế tiếp thay vì mất hẳn 1 chu kỳ. An toàn với double-trigger
+            # vì lúc này transaction claim ở trên đã commit xong (mọi lần chạy chồng lấn bị
+            # khóa chờ đều đã đọc last_triggered_at MỚI trước khi ta revert nó ở đây).
+            DeploymentSchedule.objects.filter(pk=locked.pk).update(
+                last_triggered_at=previous_triggered_at
+            )
+            continue
+
+        if job_count == 0:
+            # Không có máy đích enabled → không có gì để chạy, đóng lại tránh kẹt RUNNING.
+            deployment.status = DeploymentStatus.COMPLETED
+            deployment.finished_at = timezone.now()
+            deployment.save(update_fields=["status", "finished_at"])
+
+        triggered += 1
+        logger.info(
+            "Schedule %s (%s) kích hoạt deployment %s (%s job)",
+            locked.pk, locked.recurrence_type, deployment.pk, job_count,
+        )
+
+    return {"triggered": triggered}

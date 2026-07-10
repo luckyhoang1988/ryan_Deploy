@@ -6,8 +6,10 @@ Giới hạn `max_concurrency` của một Deployment không thể biểu diễn
 job chạy đồng thời theo từng deployment). Thay vào đó dùng một bộ đếm Redis:
 mỗi job `deploy_to_machine` xin 1 slot trước khi chạy, trả lại slot khi xong.
 
-Thiết kế fail-open: nếu Redis lỗi/không sẵn sàng, coi như cấp slot (không chặn deploy)
-— throttle chỉ là best-effort, không được biến sự cố Redis thành sự cố deploy.
+Thiết kế fail-closed: nếu Redis lỗi/không sẵn sàng, TỪ CHỐI slot thay vì cấp — max_concurrency
+là ràng buộc an toàn (tránh flood hàng trăm máy cùng lúc), không được bỏ qua chỉ vì hạ tầng
+đếm bị lỗi. Job gọi acquire_slot sẽ tự retry (xem deploy_to_machine) nên khi Redis hồi phục,
+deploy vẫn tiếp tục bình thường — chỉ tạm dừng trong lúc Redis lỗi, không mất job.
 Bộ đếm có TTL an toàn: nếu worker bị kill giữa chừng làm rò slot, TTL sẽ tự reset
 để deployment không kẹt vĩnh viễn.
 """
@@ -29,7 +31,7 @@ def _redis():
 
 
 def _key(deployment_id: int) -> str:
-    return f"pydeploy:sema:deploy:{deployment_id}"
+    return f"ryandeploy:sema:deploy:{deployment_id}"
 
 
 def acquire_slot(deployment_id: int, limit: int, ttl: int) -> bool:
@@ -49,18 +51,27 @@ def acquire_slot(deployment_id: int, limit: int, ttl: int) -> bool:
             r.decr(key)  # vượt trần → trả lại, báo caller chờ
             return False
         return True
-    except redis.RedisError as e:  # fail-open
-        logger.warning("Semaphore acquire lỗi Redis (cấp slot fail-open): %s", e)
-        return True
+    except redis.RedisError as e:  # fail-closed
+        logger.warning("Semaphore acquire lỗi Redis (từ chối slot fail-closed): %s", e)
+        return False
+
+
+# GET + DECR phải atomic: hai release đồng thời với GET-then-DECR cũ có thể cùng thấy
+# counter > 0 rồi cả hai DECR → counter âm → slot "ảo", vượt max_concurrency.
+_RELEASE_LUA = """
+local v = tonumber(redis.call('get', KEYS[1]) or '0')
+if v > 0 then
+  return redis.call('decr', KEYS[1])
+end
+return 0
+"""
 
 
 def release_slot(deployment_id: int) -> None:
-    """Trả lại 1 slot (guarded: không cho đếm xuống âm)."""
+    """Trả lại 1 slot (atomic, không cho đếm xuống âm)."""
     key = _key(deployment_id)
     try:
-        r = _redis()
-        if int(r.get(key) or 0) > 0:
-            r.decr(key)
+        _redis().eval(_RELEASE_LUA, 1, key)
     except redis.RedisError as e:
         logger.warning("Semaphore release lỗi Redis (bỏ qua): %s", e)
 
