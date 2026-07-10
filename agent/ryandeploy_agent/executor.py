@@ -32,6 +32,7 @@ class JobOutcome:
     error: str
     needs_reboot: bool
     verify_passed: Optional[bool]  # None = không hậu kiểm / không kết luận được
+    skipped: bool = False  # True = tiền kiểm thấy đã cài sẵn -> không chạy command
 
 
 def run_job(client: AgentClient, job: dict, job_timeout: int) -> JobOutcome:
@@ -46,6 +47,19 @@ def run_job(client: AgentClient, job: dict, job_timeout: int) -> JobOutcome:
 
 
 def _run_job_in(client: AgentClient, job: dict, workdir: str, timeout: int) -> JobOutcome:
+    precheck = job.get("precheck")
+    if precheck:
+        # Tiền kiểm registry TRƯỚC KHI tải payload — đã có sẵn thì bỏ qua cài đặt, không tốn
+        # băng thông tải installer (cùng mục đích với _probe_already_installed phía SMB, xem
+        # backend/apps/jobs/tasks.py). already=None (không kết luận được) -> cứ tiến hành cài
+        # bình thường, không suy diễn từ 1 lần kiểm thất bại.
+        already = _run_precheck(client, precheck, workdir, timeout)
+        if already:
+            return JobOutcome(
+                exit_code=0, stdout="Đã cài đặt sẵn trên máy — bỏ qua (đã tồn tại).",
+                error="", needs_reboot=False, verify_passed=None, skipped=True,
+            )
+
     command = job["command"]
 
     payload = job.get("payload")
@@ -164,5 +178,32 @@ def _run_verify(client: AgentClient, verify: dict, workdir: str, timeout: int) -
     exit_code, _, run_error = _run_command(command, workdir, timeout)
     if exit_code is None:
         logger.warning("Hậu kiểm không hoàn tất (%s) — giữ nguyên kết quả cài đặt", run_error)
+        return None
+    return exit_code == 0
+
+
+def _run_precheck(client: AgentClient, precheck: dict, workdir: str, timeout: int) -> Optional[bool]:
+    """Tiền kiểm registry trước khi cài — có sẵn rồi thì trả True để caller bỏ qua, không cài
+    chồng lên bản đã có. Luôn kiểm `-Present 1` (tìm "đã tồn tại"), không phụ thuộc tham số
+    `present` trong payload — cùng ngữ nghĩa `_probe_already_installed` phía SMB (server chỉ
+    gửi precheck cho action INSTALL).
+
+    Trả None nếu không tải/chạy được script (không kết luận) — caller phải cứ tiến hành cài,
+    không suy diễn từ một lần kiểm thất bại."""
+    script_path = os.path.join(workdir, "ryandeploy_precheck.ps1")
+    try:
+        client.download_to(precheck["script_url"], script_path)
+    except ApiError as e:
+        logger.warning("Không tải được script tiền kiểm: %s", e)
+        return None
+
+    name = (precheck.get("name") or "").replace('"', "")  # tránh vỡ tham số PowerShell
+    command = (
+        f'powershell -NoProfile -ExecutionPolicy Bypass -File "{script_path}" '
+        f'-Name "{name}" -Present 1'
+    )
+    exit_code, _, run_error = _run_command(command, workdir, timeout)
+    if exit_code is None:
+        logger.warning("Tiền kiểm không hoàn tất (%s) — cứ tiến hành cài", run_error)
         return None
     return exit_code == 0

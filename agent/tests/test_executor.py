@@ -172,3 +172,74 @@ def test_verify_download_error_returns_none_not_false():
     outcome = run_job(client, job, JOB_TIMEOUT)
     assert outcome.exit_code == 0
     assert outcome.verify_passed is None
+
+
+_PRECHECK_FOUND_SCRIPT = (
+    "param([string]$Name, [int]$Present = 1)\n"
+    "exit 0\n"
+)
+_PRECHECK_NOT_FOUND_SCRIPT = (
+    "param([string]$Name, [int]$Present = 1)\n"
+    "exit 1\n"
+)
+
+
+def test_precheck_skips_install_when_already_present():
+    def fake_download(url, dest_path):
+        with open(dest_path, "w", encoding="utf-8") as fh:
+            fh.write(_PRECHECK_FOUND_SCRIPT)
+        return None
+
+    client = Mock(spec=AgentClient)
+    client.download_to.side_effect = fake_download
+
+    job = {
+        # Nếu lỡ chạy (không skip) sẽ lộ ra qua exit_code=99 thay vì 0.
+        "command": "cmd /c exit 99",
+        "success_exit_codes": [0],
+        "precheck": {"script_url": "https://x/scripts/verify_installed.ps1", "name": "7-Zip"},
+    }
+    outcome = run_job(client, job, JOB_TIMEOUT)
+    assert outcome.skipped is True
+    assert outcome.exit_code == 0
+    client.download_to.assert_called_once()  # chỉ tải script tiền kiểm, không tải payload/chạy command
+
+
+def test_precheck_proceeds_with_install_when_not_present():
+    def fake_download(url, dest_path):
+        with open(dest_path, "w", encoding="utf-8") as fh:
+            fh.write(_PRECHECK_NOT_FOUND_SCRIPT)
+        return None
+
+    client = Mock(spec=AgentClient)
+    client.download_to.side_effect = fake_download
+
+    job = {
+        "command": "cmd /c exit 0",
+        "success_exit_codes": [0],
+        "precheck": {"script_url": "https://x/scripts/verify_installed.ps1", "name": "7-Zip"},
+    }
+    outcome = run_job(client, job, JOB_TIMEOUT)
+    assert outcome.skipped is False
+    assert outcome.exit_code == 0
+
+
+def test_precheck_download_error_proceeds_with_install():
+    client = Mock(spec=AgentClient)
+    client.download_to.side_effect = ApiError("timeout")
+
+    job = {
+        "command": "cmd /c exit 0",
+        "success_exit_codes": [0],
+        "precheck": {"script_url": "https://x/scripts/verify_installed.ps1", "name": "7-Zip"},
+    }
+    outcome = run_job(client, job, JOB_TIMEOUT)
+    assert outcome.skipped is False
+    assert outcome.exit_code == 0
+
+
+def test_no_precheck_key_runs_command_normally():
+    client = Mock(spec=AgentClient)
+    job = {"command": "cmd /c exit 0", "success_exit_codes": [0]}
+    outcome = run_job(client, job, JOB_TIMEOUT)
+    assert outcome.skipped is False

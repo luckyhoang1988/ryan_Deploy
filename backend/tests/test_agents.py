@@ -230,6 +230,44 @@ def test_poll_returns_job_payload_and_marks_running(agent_machine, install_deplo
     assert resp2.json() == {"job": None}
 
 
+def test_poll_includes_precheck_when_verify_name_set_on_install(agent_machine, install_deployment, package_version):
+    package_version.verify_name = "7-Zip"
+    package_version.save(update_fields=["verify_name"])
+    raw = issue_token(agent_machine)
+
+    client = APIClient()
+    data = client.post("/api/agent/jobs/poll/", **_auth_header(raw)).json()["job"]
+
+    assert data["precheck"] == {
+        "script_url": data["verify"]["script_url"],
+        "name": "7-Zip",
+    }
+
+
+def test_poll_precheck_none_when_no_verify_name(agent_machine, install_deployment):
+    # package_version fixture để verify_name trống -> không có gì để tiền kiểm, không gửi precheck.
+    raw = issue_token(agent_machine)
+    client = APIClient()
+    data = client.post("/api/agent/jobs/poll/", **_auth_header(raw)).json()["job"]
+    assert data["precheck"] is None
+
+
+def test_report_skipped_writes_job_skipped_and_releases(agent_machine, install_deployment):
+    raw = issue_token(agent_machine)
+    client = APIClient()
+    poll = client.post("/api/agent/jobs/poll/", **_auth_header(raw)).json()["job"]
+
+    resp = client.post(
+        f"/api/agent/jobs/{poll['job_id']}/report/",
+        {"exit_code": 0, "stdout": "Đã cài đặt sẵn trên máy — bỏ qua (đã tồn tại).", "skipped": True},
+        format="json", **_auth_header(raw),
+    )
+    assert resp.status_code == 200
+    job = Job.objects.get(pk=poll["job_id"])
+    assert job.status == JobStatus.SKIPPED
+    assert job.output == "Đã cài đặt sẵn trên máy — bỏ qua (đã tồn tại)."
+
+
 def test_download_rejected_without_running_job_for_that_version(agent_machine, package_version):
     raw = issue_token(agent_machine)
     client = APIClient()

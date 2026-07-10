@@ -21,7 +21,7 @@ from rest_framework.views import APIView
 from apps.audit.models import AuditLog
 from apps.deployments.actions import VERIFY_SCRIPT_PATH, build_action_plan
 from apps.deployments.inventory_action import SCRIPT_PATH as INVENTORY_SCRIPT_PATH
-from apps.deployments.models import PACKAGE_ACTIONS
+from apps.deployments.models import PACKAGE_ACTIONS, DeploymentAction
 from apps.executor.push_executor import ExecResult
 from apps.jobs.models import Job, JobStatus
 from apps.jobs.tasks import _job_timeout, _write_job_result
@@ -139,6 +139,15 @@ class AgentJobPollView(_AgentAPIView):
                 "present": plan.verify_present,
             }
 
+        precheck = None
+        if deployment.action == DeploymentAction.INSTALL and plan.verify_name:
+            # Tiền kiểm: đồng ngữ nghĩa với _probe_already_installed phía SMB (tasks.py) —
+            # chỉ gửi cho action INSTALL, agent luôn kiểm -Present 1 (đã cài sẵn chưa).
+            precheck = {
+                "script_url": request.build_absolute_uri(reverse("agent-script", args=["verify_installed.ps1"])),
+                "name": plan.verify_name,
+            }
+
         return Response({
             "job": {
                 "job_id": job.pk,
@@ -147,6 +156,7 @@ class AgentJobPollView(_AgentAPIView):
                 "success_exit_codes": plan.success_exit_codes,
                 "payload": payload,
                 "verify": verify,
+                "precheck": precheck,
             }
         })
 
@@ -188,8 +198,25 @@ class AgentJobReportView(_AgentAPIView):
         error = request.data.get("error") or ""
         needs_reboot = bool(request.data.get("needs_reboot", False))
         verify_passed = request.data.get("verify_passed")  # None = không hậu kiểm, True/False = có
+        skipped = bool(request.data.get("skipped", False))
 
         deployment = job.deployment
+
+        if skipped:
+            # Agent tự tiền kiểm thấy đã cài sẵn -> không chạy command (xem executor.py
+            # _run_precheck). Ghi SKIPPED thẳng, bỏ qua toàn bộ logic success/verify/post_hook
+            # bên dưới — cùng ngữ nghĩa với _probe_already_installed phía SMB (tasks.py).
+            release_slot(deployment.id)
+            if not _write_job_result(
+                job, status=JobStatus.SKIPPED, output=stdout, error_output="",
+                current_step="done", finished_at=timezone.now(),
+            ):
+                return Response({"detail": "Job đã bị hủy trước khi report."}, status=status.HTTP_409_CONFLICT)
+            AuditLog.record(
+                AuditLog.Action.JOB_FINISH, target=job, machine_hostname=machine.hostname, status=job.status,
+            )
+            return Response({"status": job.status})
+
         plan = build_action_plan(deployment, machine)
         success = exit_code is not None and exit_code in (plan.success_exit_codes or [0])
         final_error = error

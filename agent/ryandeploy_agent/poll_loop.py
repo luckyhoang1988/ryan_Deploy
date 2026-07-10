@@ -113,6 +113,7 @@ class PollLoop:
                 error=outcome.error,
                 needs_reboot=outcome.needs_reboot,
                 verify_passed=outcome.verify_passed,
+                skipped=outcome.skipped,
             )
         except ApiError as e:
             # Server có thể đã tự hủy job này (vd cancel) — không có gì thêm để làm ngoài log,

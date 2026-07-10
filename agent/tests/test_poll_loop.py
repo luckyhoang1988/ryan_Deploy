@@ -51,6 +51,42 @@ def test_job_is_executed_and_reported():
     assert args[0] == 7
     assert kwargs["exit_code"] == 0
     assert kwargs["verify_passed"] is None
+    assert kwargs["skipped"] is False
+
+
+def test_job_skipped_by_precheck_is_reported_with_skipped_true():
+    stop_event = threading.Event()
+    client = Mock()
+    job = {
+        # Nếu lỡ chạy (không skip) sẽ lộ ra qua exit_code=99 thay vì 0 do precheck.
+        "job_id": 9, "command": "cmd /c exit 99", "success_exit_codes": [0],
+        "precheck": {"script_url": "https://x/scripts/verify_installed.ps1", "name": "7-Zip"},
+    }
+
+    def fake_download(url, dest_path):
+        with open(dest_path, "w", encoding="utf-8") as fh:
+            fh.write("param([string]$Name, [int]$Present = 1)\nexit 0\n")
+        return None
+
+    client.download_to.side_effect = fake_download
+    calls = {"n": 0}
+
+    def fake_poll():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return job
+        stop_event.set()
+        return None
+
+    client.poll_job.side_effect = fake_poll
+    loop = PollLoop(_config(), stop_event, client=client)
+    loop.run_forever()
+
+    client.report_job.assert_called_once()
+    args, kwargs = client.report_job.call_args
+    assert args[0] == 9
+    assert kwargs["skipped"] is True
+    assert kwargs["exit_code"] == 0
 
 
 def test_backoff_on_poll_error_then_recovers():
