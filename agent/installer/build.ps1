@@ -12,8 +12,14 @@ Yêu cầu:
         pyinstaller --clean --noconfirm pyinstaller.spec
 
 Sử dụng:
-  .\build.ps1                  # dùng version mặc định 1.0.0.0, không đóng cứng secret
-  .\build.ps1 -Version 1.2.0.0 # tăng version mỗi lần rebuild để GPO nhận là upgrade
+  .\build.ps1                  # không truyền -Version: tự đọc VERSION.txt và +1 revision cuối,
+                                # tránh lỗi "downgrade" khi máy đích đã cài bản cao hơn
+  .\build.ps1 -Version 1.2.0.0 # ép version cụ thể (vd: máy đích đang cài bản cao hơn VERSION.txt
+                                # do từng build tay ở máy khác không cập nhật VERSION.txt)
+
+  VERSION.txt lưu ProductVersion build gần nhất — build xong thành công mới ghi đè file này,
+  nên nếu bạn build tay với -Version ở máy khác nhớ đồng bộ VERSION.txt lại (hoặc luôn build từ
+  một chỗ duy nhất) để lần "không truyền -Version" tiếp theo không bị lệch so với máy đích.
 
   # Phương án A — MSI "cài là chạy": đóng cứng server + 1 secret KHÔNG HẾT HẠN (tạo trong UI
   # Machines > Enrollment Secrets > tick "Không hết hạn"). ⚠️ Secret sẽ nằm PLAINTEXT trong file
@@ -29,13 +35,26 @@ Sử dụng:
   .\build.ps1 -EnrollSecret "<secret-vua-tao>" -ForceOverwrite
 #>
 param(
-    [string]$Version = "1.0.0.0",
+    [string]$Version = "",
     [string]$ServerUrl = "https://10.0.193.231",
     [string]$EnrollSecret = "",
     [switch]$ForceOverwrite
 )
 
 $ErrorActionPreference = "Stop"
+
+$versionFile = Join-Path $PSScriptRoot "VERSION.txt"
+if (-not $Version) {
+    $lastVersion = "1.0.0.0"
+    if (Test-Path $versionFile) {
+        $lastVersion = (Get-Content $versionFile -Raw).Trim()
+    }
+    $parts = $lastVersion.Split(".")
+    if ($parts.Count -ne 4) { $parts = @("1", "0", "0", "0") }
+    $parts[3] = [string]([int]$parts[3] + 1)
+    $Version = $parts -join "."
+    Write-Host "Không truyền -Version — tự tăng từ $lastVersion thành $Version (xem VERSION.txt)"
+}
 
 function Find-WixTool([string]$Name) {
     $cmd = Get-Command $Name -ErrorAction SilentlyContinue
@@ -82,4 +101,5 @@ $msiPath = Join-Path $scriptDir "RyanDeployAgentSetup.msi"
 & $light -ext WixUtilExtension -out $msiPath (Join-Path $objDir "Product.wixobj")
 if ($LASTEXITCODE -ne 0) { throw "light.exe thất bại (exit $LASTEXITCODE)" }
 
+Set-Content -Path $versionFile -Value $Version -NoNewline
 Write-Host "Đã build xong: $msiPath"
