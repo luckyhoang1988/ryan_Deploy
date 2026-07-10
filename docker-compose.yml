@@ -5,6 +5,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-ryandeploy}
       POSTGRES_USER: ${POSTGRES_USER:-ryandeploy}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ryandeploy}
+      TZ: Asia/Ho_Chi_Minh
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
@@ -17,6 +18,8 @@ services:
 
   redis:
     image: redis:7-alpine
+    environment:
+      TZ: Asia/Ho_Chi_Minh
     ports:
       - "6379:6379"
     healthcheck:
@@ -34,6 +37,7 @@ services:
       DJANGO_SETTINGS_MODULE: ryandeploy.settings.dev
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
+      TZ: Asia/Ho_Chi_Minh
     env_file:
       - .env
     volumes:
@@ -54,6 +58,7 @@ services:
       DJANGO_SETTINGS_MODULE: ryandeploy.settings.dev
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
+      TZ: Asia/Ho_Chi_Minh
     env_file:
       - .env
     volumes:
@@ -71,6 +76,7 @@ services:
       DJANGO_SETTINGS_MODULE: ryandeploy.settings.dev
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
+      TZ: Asia/Ho_Chi_Minh
     env_file:
       - .env
     volumes:
