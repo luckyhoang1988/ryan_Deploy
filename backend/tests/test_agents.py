@@ -648,6 +648,23 @@ def test_enroll_auto_revokes_stale_token_when_machine_offline(agent_machine):
     active = AgentToken.objects.filter(machine=agent_machine, revoked_at__isnull=True)
     assert active.count() == 1
     assert active.first().token_hash == hash_token(new_raw)
+    assert AuditLog.objects.filter(action=AuditLog.Action.AGENT_TOKEN_AUTO_REVOKE_OFFLINE).exists()
+
+
+def test_enroll_rejects_when_offline_flag_stale_but_token_recently_used(agent_machine):
+    # is_online=False có thể chỉ là cờ máy chưa kịp cập nhật (mark_stale_machines_offline chạy
+    # định kỳ, trễ tới AGENT_OFFLINE_THRESHOLD giây) trong khi token vẫn đang thực sự được dùng
+    # (agent vẫn poll/report bình thường) — kẻ tấn công có enrollment_secret không được phép lợi
+    # dụng cửa sổ trễ đó để cướp token của máy còn sống. last_used_at gần đây phải chặn enroll.
+    assert agent_machine.is_online is False
+    issue_token(agent_machine)
+    AgentToken.objects.filter(machine=agent_machine).update(last_used_at=timezone.now())
+    raw_secret, _ = issue_enrollment_secret("", _future())
+
+    with pytest.raises(EnrollmentError, match="đã có token agent đang hoạt động"):
+        enroll_machine(raw_secret, agent_machine.hostname)
+
+    assert not AuditLog.objects.filter(action=AuditLog.Action.AGENT_TOKEN_AUTO_REVOKE_OFFLINE).exists()
 
 
 def test_enroll_succeeds_with_never_expiring_secret(agent_machine):

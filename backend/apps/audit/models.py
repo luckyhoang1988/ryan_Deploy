@@ -30,6 +30,9 @@ class AuditLog(models.Model):
         MACHINE_PURGE_ALL = "machine_purge_all", "Xóa toàn bộ máy"
         AGENT_TOKEN_ISSUE = "agent_token_issue", "Cấp token agent"
         AGENT_TOKEN_REVOKE = "agent_token_revoke", "Thu hồi token agent"
+        AGENT_TOKEN_AUTO_REVOKE_OFFLINE = (
+            "agent_token_auto_revoke_offline", "Tự thu hồi token agent do máy offline (enroll lại)"
+        )
         AGENT_ENROLL = "agent_enroll", "Agent tự đăng ký (self-enrollment)"
         AGENT_ENROLLMENT_SECRET_CREATE = "agent_enrollment_secret_create", "Tạo enrollment secret"
         AGENT_ENROLLMENT_SECRET_REVOKE = "agent_enrollment_secret_revoke", "Thu hồi enrollment secret"

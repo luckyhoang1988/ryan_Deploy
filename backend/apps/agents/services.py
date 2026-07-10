@@ -1,7 +1,9 @@
 import hashlib
 import logging
 import secrets
+from datetime import timedelta
 
+from django.conf import settings as django_settings
 from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
@@ -109,19 +111,40 @@ def enroll_machine(secret_raw: str, hostname: str, source_ip: str = "") -> tuple
             raise EnrollmentError("Máy đang bị vô hiệu hóa.")
         if not _ou_in_scope(machine.ad_ou, secret.ad_ou):
             raise EnrollmentError("Máy không thuộc phạm vi OU của secret này.")
-        if AgentToken.objects.filter(machine=machine, revoked_at__isnull=True).exists():
+        existing_token = AgentToken.objects.filter(machine=machine, revoked_at__isnull=True).first()
+        if existing_token is not None:
             if machine.is_online:
                 raise EnrollmentError("Máy đã có token agent đang hoạt động — cần thu hồi trước khi enroll lại.")
-            # Máy đang offline (server không nhận heartbeat quá hạn — mark_stale_machines_offline
-            # đã tự đánh False) trong khi vẫn còn 1 token active: token cũ nhiều khả năng đã chết
-            # cục bộ trên máy đích (agent mất token, service crash, ProgramData bị xoá...), không
-            # phải bị "chiếm" bởi 1 agent khác đang thực sự chạy — is_online=True mới là tín hiệu
-            # có 1 agent sống đang giữ token đó. Tự thu hồi token cũ để agent thật tự phục hồi
-            # được qua enrollment_secret, tránh deadlock enroll lặp vô hạn (đã xảy ra 2 lần trong
-            # ngày 2026-07-10 cho ZP-IT006, phải revoke tay mới gỡ được — xem LESSONS.md).
+            # is_online=False chỉ là cờ máy, được set bởi mark_stale_machines_offline (chạy định kỳ,
+            # có độ trễ tới AGENT_OFFLINE_THRESHOLD giây) — không phải tín hiệu tức thời. Một attacker
+            # có enrollment_secret có thể canh đúng cửa sổ đó để cướp token của 1 máy vẫn đang thực sự
+            # sống. Đối chiếu thêm với AgentToken.last_used_at (cập nhật ở MỌI request xác thực bằng
+            # token — poll/report/download/heartbeat, xem AgentTokenAuthentication) làm tín hiệu độc
+            # lập thứ hai: nếu token vẫn được dùng gần đây hơn cùng ngưỡng đó thì coi máy còn sống,
+            # từ chối enroll thay vì tự thu hồi.
+            threshold = django_settings.RYANDEPLOY.get("AGENT_OFFLINE_THRESHOLD", 900)
+            cutoff = now - timedelta(seconds=threshold)
+            token_recently_used = (
+                existing_token.last_used_at is not None and existing_token.last_used_at >= cutoff
+            )
+            if token_recently_used:
+                raise EnrollmentError("Máy đã có token agent đang hoạt động — cần thu hồi trước khi enroll lại.")
+            # Máy đang offline (server không nhận heartbeat quá hạn) trong khi vẫn còn 1 token active
+            # và token đó cũng không có request nào gần đây: token cũ nhiều khả năng đã chết cục bộ
+            # trên máy đích (agent mất token, service crash, ProgramData bị xoá...), không phải bị
+            # "chiếm" bởi 1 agent khác đang thực sự chạy. Tự thu hồi token cũ để agent thật tự phục
+            # hồi được qua enrollment_secret, tránh deadlock enroll lặp vô hạn (đã xảy ra 2 lần trong
+            # ngày 2026-07-10 cho ZP-IT006, phải revoke tay mới gỡ được — xem LESSONS.md). Ghi audit
+            # riêng (khác AGENT_ENROLL thường) vì đây là hành vi thu hồi ngầm, cần cảnh báo được.
             logger.warning(
                 "Agent enroll: hostname=%s đang offline nhưng còn token active — tự thu hồi token "
                 "cũ để cấp lại (nghi máy mất token cục bộ).", hostname,
+            )
+            from apps.audit.models import AuditLog
+
+            AuditLog.record(
+                AuditLog.Action.AGENT_TOKEN_AUTO_REVOKE_OFFLINE, target=machine,
+                machine_hostname=machine.hostname, source_ip=source_ip,
             )
             revoke_token(machine)
 
